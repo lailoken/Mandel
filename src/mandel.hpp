@@ -26,23 +26,23 @@ struct max_zoom_trait;
 template<>
 struct max_zoom_trait<float>
 {
-    static constexpr uint64_t value = 1000000ULL;  // Lower precision for float (1e6)
+    static constexpr float value = 1000000.0f;  // Lower precision for float (1e6)
 };
 
 template<>
 struct max_zoom_trait<double>
 {
-    static constexpr uint64_t value = 70000000000000ULL;  // Tested maximum before visible errors: 70113537556480, rounded to 7e13
+    static constexpr double value = 70000000000000.0;  // Tested maximum before visible errors: 70113537556480, rounded to 7e13
 };
 
 template<>
 struct max_zoom_trait<long double>
 {
-    static constexpr uint64_t value = 7000000000000000000ULL;  // Higher precision for long double (7e18)
+    static constexpr long double value = 100000000000000000.0L;  // Higher precision for long double (7e18)
 };
 
 template <typename FloatType>
-inline constexpr uint64_t max_zoom_v = max_zoom_trait<FloatType>::value;
+inline constexpr FloatType max_zoom_v = max_zoom_trait<FloatType>::value;
 
 // Internal structures
 template<typename FloatType>
@@ -96,14 +96,14 @@ public:
     // Update parameters
     void set_max_iterations(int max_iterations) { max_iterations_ = max_iterations; }
     void set_bounds(FloatType x_min, FloatType x_max, FloatType y_min, FloatType y_max) { x_min_ = x_min; x_max_ = x_max; y_min_ = y_min; y_max_ = y_max; }
-    void set_zoom(uint64_t zoom) { zoom_ = zoom; }
+    void set_zoom(FloatType zoom) { zoom_ = zoom; }
 
     int get_max_iterations() const { return max_iterations_; }
     FloatType get_x_min() const { return x_min_; }
     FloatType get_x_max() const { return x_max_; }
     FloatType get_y_min() const { return y_min_; }
     FloatType get_y_max() const { return y_max_; }
-    uint64_t get_zoom() const { return zoom_; }
+    FloatType get_zoom() const { return zoom_; }
 
     // Get pixel buffer
     const unsigned char* get_pixels() const { return pixels_.data(); }
@@ -120,7 +120,7 @@ public:
     static constexpr FloatType default_y_max = static_cast<FloatType>(2.0);
     
     // Maximum zoom level based on floating point type precision
-    static constexpr uint64_t max_zoom = max_zoom_v<FloatType>;
+    static constexpr FloatType max_zoom = max_zoom_v<FloatType>;
 
  private:
     // Internal methods
@@ -138,7 +138,7 @@ public:
     FloatType x_max_;
     FloatType y_min_;
     FloatType y_max_;
-    uint64_t zoom_;
+    FloatType zoom_;
     int max_iterations_;
 
     ::std::vector<unsigned char> pixels_;

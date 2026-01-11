@@ -34,7 +34,8 @@ public:
 private:
     void swap_buffers();
     void clear_canvas();  // Clear canvas before rendering when double buffering is disabled
-    
+    bool is_render_in_progress() const;  // Check if a render is currently in progress
+
     MandelbrotRenderer<FloatType>* renderer_;
     ImTextureID texture_front_;  // Currently displayed texture (front buffer)
     ImTextureID texture_back_;   // Texture being updated (back buffer)
@@ -67,6 +68,9 @@ private:
     
     // Track threading state (controlled by UI checkbox)
     bool threading_enabled_;
+
+    // Track controls window transparency state
+    bool controls_window_should_be_transparent_;
 };
 
 }  // namespace mandel
