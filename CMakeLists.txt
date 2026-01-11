@@ -20,20 +20,51 @@ else()
     # GCC/Clang compiler flags
     # Debug: debuggable with symbols, no optimizations
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra")
+    
     # Release: maximum optimizations for speed
+    # Start with -O3 for maximum standard optimizations
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
+    
     # Enable LTO (Link Time Optimization) for Release
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    
     # RelWithDebInfo: optimized but still debuggable
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
     # MinSizeRel: optimize for size
     set(CMAKE_CXX_FLAGS_MINSIZEREL "-Os -DNDEBUG")
     
-    # Add architecture-specific optimizations for Release (if supported)
+    # Add architecture-specific and aggressive optimizations for Release
     include(CheckCXXCompilerFlag)
+    
+    # Architecture-specific optimizations
     check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
     if(COMPILER_SUPPORTS_MARCH_NATIVE)
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native")
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -march=native -mtune=native")
+    endif()
+    
+    # Fast math optimizations (safe for Mandelbrot calculations)
+    # Allows more aggressive floating-point optimizations
+    check_cxx_compiler_flag("-ffast-math" COMPILER_SUPPORTS_FAST_MATH)
+    if(COMPILER_SUPPORTS_FAST_MATH)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math")
+    endif()
+    
+    # Loop unrolling optimizations
+    check_cxx_compiler_flag("-funroll-loops" COMPILER_SUPPORTS_UNROLL_LOOPS)
+    if(COMPILER_SUPPORTS_UNROLL_LOOPS)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -funroll-loops")
+    endif()
+    
+    # More aggressive inlining
+    check_cxx_compiler_flag("-finline-functions" COMPILER_SUPPORTS_INLINE_FUNCTIONS)
+    if(COMPILER_SUPPORTS_INLINE_FUNCTIONS)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -finline-functions")
+    endif()
+    
+    # Vectorization hints (if available)
+    check_cxx_compiler_flag("-ftree-vectorize" COMPILER_SUPPORTS_TREE_VECTORIZE)
+    if(COMPILER_SUPPORTS_TREE_VECTORIZE)
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ftree-vectorize")
     endif()
 endif()
 

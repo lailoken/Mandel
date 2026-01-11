@@ -26,23 +26,23 @@ struct max_zoom_trait;
 template<>
 struct max_zoom_trait<float>
 {
-    static constexpr float value = 1e6f;  // Lower precision for float
+    static constexpr uint64_t value = 1000000ULL;  // Lower precision for float (1e6)
 };
 
 template<>
 struct max_zoom_trait<double>
 {
-    static constexpr double value = 7e13;  // Tested maximum before visible errors: 70113537556480, rounded to 7e13
+    static constexpr uint64_t value = 70000000000000ULL;  // Tested maximum before visible errors: 70113537556480, rounded to 7e13
 };
 
 template<>
 struct max_zoom_trait<long double>
 {
-    static constexpr long double value = 7e18L;  // Higher precision for long double
+    static constexpr uint64_t value = 7000000000000000000ULL;  // Higher precision for long double (7e18)
 };
 
-template<typename FloatType>
-inline constexpr FloatType max_zoom_v = max_zoom_trait<FloatType>::value;
+template <typename FloatType>
+inline constexpr uint64_t max_zoom_v = max_zoom_trait<FloatType>::value;
 
 // Internal structures
 template<typename FloatType>
@@ -90,19 +90,20 @@ public:
     // Regenerate the Mandelbrot set (call when parameters change)
     // If thread_pool is nullptr, generates synchronously (single-threaded)
     // If thread_pool is provided, uses that thread pool for parallel generation
-    void regenerate(ThreadPool* thread_pool = nullptr);
+    // If pan_dx and pan_dy are provided, shifts existing pixels and only regenerates exposed regions
+    void regenerate(ThreadPool* thread_pool = nullptr, int pan_dx = 0, int pan_dy = 0);
 
     // Update parameters
     void set_max_iterations(int max_iterations) { max_iterations_ = max_iterations; }
     void set_bounds(FloatType x_min, FloatType x_max, FloatType y_min, FloatType y_max) { x_min_ = x_min; x_max_ = x_max; y_min_ = y_min; y_max_ = y_max; }
-    void set_zoom(FloatType zoom) { zoom_ = zoom; }
+    void set_zoom(uint64_t zoom) { zoom_ = zoom; }
 
     int get_max_iterations() const { return max_iterations_; }
     FloatType get_x_min() const { return x_min_; }
     FloatType get_x_max() const { return x_max_; }
     FloatType get_y_min() const { return y_min_; }
     FloatType get_y_max() const { return y_max_; }
-    FloatType get_zoom() const { return zoom_; }
+    uint64_t get_zoom() const { return zoom_; }
 
     // Get pixel buffer
     const unsigned char* get_pixels() const { return pixels_.data(); }
@@ -119,10 +120,9 @@ public:
     static constexpr FloatType default_y_max = static_cast<FloatType>(2.0);
     
     // Maximum zoom level based on floating point type precision
-    static constexpr FloatType max_zoom = max_zoom_v<FloatType>;
+    static constexpr uint64_t max_zoom = max_zoom_v<FloatType>;
 
-private:
-
+ private:
     // Internal methods
     int compute_mandelbrot(::std::complex<FloatType> c, int max_iter) const;
     void paint_pixel(int x_pos, int y_pos, const ColorScheme::Color& color);
@@ -138,7 +138,7 @@ private:
     FloatType x_max_;
     FloatType y_min_;
     FloatType y_max_;
-    FloatType zoom_;
+    uint64_t zoom_;
     int max_iterations_;
 
     ::std::vector<unsigned char> pixels_;

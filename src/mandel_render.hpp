@@ -60,7 +60,7 @@ private:
     FloatType initial_x_max_;
     FloatType initial_y_min_;
     FloatType initial_y_max_;
-    FloatType initial_zoom_;
+    uint64_t initial_zoom_;
     
     // Track if first window resize has happened
     bool first_window_size_set_;

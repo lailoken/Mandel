@@ -1,12 +1,13 @@
 #pragma once
 
-#include "mandel.hpp"
-
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
+#include "mandel.hpp"
 #include "thread_pool.hpp"
 
 namespace mandel
@@ -35,19 +36,19 @@ template<typename FloatType>
 }
 
 // Template implementation of MandelbrotRenderer
-template<typename FloatType>
+template <typename FloatType>
 MandelbrotRenderer<FloatType>::MandelbrotRenderer(int width, int height)
-    : width_(width)
-    , height_(height)
-    , x_min_(static_cast<FloatType>(-2.5))
-    , x_max_(static_cast<FloatType>(1.5))
-    , y_min_(static_cast<FloatType>(-2.0))
-    , y_max_(static_cast<FloatType>(2.0))
-    , zoom_(static_cast<FloatType>(1.0))
-    , max_iterations_(100)
-    , palette_(256)
-    , metrics_(width, height, x_min_, x_max_, y_min_, y_max_)
-    , render_callback_(nullptr)
+    : width_(width),
+      height_(height),
+      x_min_(static_cast<FloatType>(-2.5)),
+      x_max_(static_cast<FloatType>(1.5)),
+      y_min_(static_cast<FloatType>(-2.0)),
+      y_max_(static_cast<FloatType>(2.0)),
+      zoom_(1ULL),
+      max_iterations_(512),
+      palette_(32),
+      metrics_(width, height, x_min_, x_max_, y_min_, y_max_),
+      render_callback_(nullptr)
 {
     init(width, height);
 }
@@ -271,10 +272,204 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot(ThreadPool* thread_pool)
     }
 }
 
-template<typename FloatType>
-void MandelbrotRenderer<FloatType>::regenerate(ThreadPool* thread_pool)
+template <typename FloatType>
+void MandelbrotRenderer<FloatType>::regenerate(ThreadPool* thread_pool, int pan_dx, int pan_dy)
 {
-    generate_mandelbrot(thread_pool);
+    // Check if we're panning (non-zero pixel offsets)
+    bool is_panning = (pan_dx != 0 || pan_dy != 0);
+
+    if (is_panning && !pixels_.empty() && width_ > 0 && height_ > 0)
+    {
+        // Panning: shift existing pixels and regenerate only exposed regions
+        // Clamp pan offsets to valid range
+        pan_dx = std::clamp(pan_dx, -width_ + 1, width_ - 1);
+        pan_dy = std::clamp(pan_dy, -height_ + 1, height_ - 1);
+
+        if (pan_dx != 0 || pan_dy != 0)
+        {
+            // Update metrics first (bounds have changed)
+            metrics_ = CanvasMetrics<FloatType>(width_, height_, x_min_, x_max_, y_min_, y_max_);
+
+            // Shift pixels using memmove
+            // For positive pan_dx: shift right (new data on left)
+            // For negative pan_dx: shift left (new data on right)
+            // Similar for pan_dy
+
+            if (pan_dx != 0 && pan_dy != 0)
+            {
+                // Both X and Y panning: use full copy to avoid overwriting issues
+                // Copy from source region to destination region with offset
+                std::vector<unsigned char> temp_buffer(pixels_);
+
+                // Calculate source and destination regions
+                int src_x_min, dst_x_min, copy_width;
+                int src_y_min, dst_y_min, copy_height;
+
+                if (pan_dx > 0)
+                {
+                    // Shift right: source is left part, destination is right part
+                    src_x_min = 0;
+                    dst_x_min = pan_dx;
+                    copy_width = width_ - pan_dx;
+                }
+                else
+                {
+                    // Shift left: source is right part, destination is left part
+                    int abs_dx = -pan_dx;
+                    src_x_min = abs_dx;
+                    dst_x_min = 0;
+                    copy_width = width_ - abs_dx;
+                }
+
+                if (pan_dy > 0)
+                {
+                    // Shift down: source is top part, destination is bottom part
+                    src_y_min = 0;
+                    dst_y_min = pan_dy;
+                    copy_height = height_ - pan_dy;
+                }
+                else
+                {
+                    // Shift up: source is bottom part, destination is top part
+                    int abs_dy = -pan_dy;
+                    src_y_min = abs_dy;
+                    dst_y_min = 0;
+                    copy_height = height_ - abs_dy;
+                }
+
+                // Copy overlapping region from source to destination
+                for (int y = 0; y < copy_height; ++y)
+                {
+                    int src_y = src_y_min + y;
+                    int dst_y = dst_y_min + y;
+                    if (dst_y >= 0 && dst_y < height_ && src_y >= 0 && src_y < height_)
+                    {
+                        std::memcpy(&pixels_[dst_y * width_ * 4 + dst_x_min * 4], &temp_buffer[src_y * width_ * 4 + src_x_min * 4], static_cast<size_t>(copy_width) * 4);
+                    }
+                }
+            }
+            else if (pan_dy != 0)
+            {
+                // Only vertical panning
+                if (pan_dy > 0)
+                {
+                    // Shift rows down (new data on top)
+                    for (int y = height_ - 1; y >= pan_dy; --y)
+                    {
+                        std::memmove(&pixels_[y * width_ * 4], &pixels_[(y - pan_dy) * width_ * 4], static_cast<size_t>(width_) * 4);
+                    }
+                }
+                else
+                {
+                    // Shift rows up (new data on bottom)
+                    int abs_dy = -pan_dy;
+                    for (int y = 0; y < height_ - abs_dy; ++y)
+                    {
+                        std::memmove(&pixels_[y * width_ * 4], &pixels_[(y + abs_dy) * width_ * 4], static_cast<size_t>(width_) * 4);
+                    }
+                }
+            }
+            else if (pan_dx != 0)
+            {
+                // Only horizontal panning
+                for (int y = 0; y < height_; ++y)
+                {
+                    unsigned char* row_start = &pixels_[y * width_ * 4];
+                    if (pan_dx > 0)
+                    {
+                        // Shift right (new data on left)
+                        std::memmove(row_start + static_cast<size_t>(pan_dx) * 4, row_start, static_cast<size_t>(width_ - pan_dx) * 4);
+                    }
+                    else
+                    {
+                        // Shift left (new data on right)
+                        int abs_dx = -pan_dx;
+                        std::memmove(row_start, row_start + static_cast<size_t>(abs_dx) * 4, static_cast<size_t>(width_ - abs_dx) * 4);
+                    }
+                }
+            }
+
+            // Determine which regions need to be regenerated
+            int32_t x_min_new = 0, x_max_new = width_ - 1;
+            int32_t y_min_new = 0, y_max_new = height_ - 1;
+
+            if (pan_dx > 0)
+            {
+                // Shifted right, regenerate left edge
+                x_min_new = 0;
+                x_max_new = pan_dx - 1;
+            }
+            else if (pan_dx < 0)
+            {
+                // Shifted left, regenerate right edge
+                x_min_new = width_ + pan_dx;
+                x_max_new = width_ - 1;
+            }
+
+            if (pan_dy > 0)
+            {
+                // Shifted down, regenerate top edge
+                y_min_new = 0;
+                y_max_new = pan_dy - 1;
+            }
+            else if (pan_dy < 0)
+            {
+                // Shifted up, regenerate bottom edge
+                y_min_new = height_ + pan_dy;
+                y_max_new = height_ - 1;
+            }
+
+            // Regenerate the exposed regions
+            if (pan_dx != 0 && pan_dy != 0)
+            {
+                // Two regions to regenerate (L-shaped or cross-shaped)
+                // Top/bottom strip + left/right strip
+                if (pan_dy > 0)
+                {
+                    // Top strip
+                    generate_mandelbrot_recurse(0, width_ - 1, 0, pan_dy - 1, thread_pool);
+                }
+                else
+                {
+                    // Bottom strip
+                    int abs_dy = -pan_dy;
+                    generate_mandelbrot_recurse(0, width_ - 1, height_ - abs_dy, height_ - 1, thread_pool);
+                }
+
+                if (pan_dx > 0)
+                {
+                    // Left strip (excluding the part already regenerated)
+                    generate_mandelbrot_recurse(0, pan_dx - 1, pan_dy > 0 ? pan_dy : 0, pan_dy < 0 ? height_ + pan_dy - 1 : height_ - 1, thread_pool);
+                }
+                else
+                {
+                    // Right strip (excluding the part already regenerated)
+                    int abs_dx = -pan_dx;
+                    generate_mandelbrot_recurse(width_ - abs_dx, width_ - 1, pan_dy > 0 ? pan_dy : 0, pan_dy < 0 ? height_ + pan_dy - 1 : height_ - 1, thread_pool);
+                }
+            }
+            else if (pan_dy != 0)
+            {
+                // Single vertical strip
+                generate_mandelbrot_recurse(0, width_ - 1, y_min_new, y_max_new, thread_pool);
+            }
+            else
+            {
+                // Single horizontal strip
+                generate_mandelbrot_recurse(x_min_new, x_max_new, 0, height_ - 1, thread_pool);
+            }
+        }
+        else
+        {
+            // No actual panning, regenerate everything
+            generate_mandelbrot(thread_pool);
+        }
+    }
+    else
+    {
+        // Not panning, regenerate everything
+        generate_mandelbrot(thread_pool);
+    }
 }
 
 }  // namespace mandel

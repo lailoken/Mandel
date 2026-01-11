@@ -1,47 +1,153 @@
 #ifndef MANDEL_RENDER_INL
 #define MANDEL_RENDER_INL
 
-#include "mandel_render.hpp"
-#include "mandel.hpp"
-#include "thread_pool.hpp"
-
 #include "imgui.h"
-#include <climits>
+
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <cstring>
+#include <limits>
+#include <type_traits>
 #include <vector>
+
+#include "mandel.hpp"
+#include "mandel_render.hpp"
+#include "thread_pool.hpp"
 
 namespace mandel
 {
 
-template<typename FloatType>
-ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer, 
-                             TextureUpdateCallback update_callback,
-                             TextureDeleteCallback delete_callback)
-    : renderer_(renderer)
-    , texture_front_(0)
-    , texture_back_(0)
-    , width_(0)
-    , height_(0)
-    , pixels_(nullptr)
-    , pixels_being_updated_(nullptr)
-    , texture_dirty_(false)
-    , double_buffering_enabled_(true)
-    , render_generation_(0)
-    , pixels_generation_(0)
-    , swapped_generation_(UINT_MAX)
-    , update_callback_(update_callback)
-    , delete_callback_(delete_callback)
-    , is_dragging_(false)
-    , last_drag_pos_(0.0f, 0.0f)
-    , initial_bounds_set_(false)
-    , initial_x_min_(static_cast<FloatType>(0.0))
-    , initial_x_max_(static_cast<FloatType>(0.0))
-    , initial_y_min_(static_cast<FloatType>(0.0))
-    , initial_y_max_(static_cast<FloatType>(0.0))
-    , initial_zoom_(static_cast<FloatType>(1.0))
-    , first_window_size_set_(false)
-    , threading_enabled_(true)
+// Template helper to map FloatType to ImGuiDataType
+template <typename FloatType>
+struct ImGuiDataTypeMap;
+
+template <>
+struct ImGuiDataTypeMap<float>
+{
+    static constexpr ImGuiDataType value = ImGuiDataType_Float;
+};
+
+template <>
+struct ImGuiDataTypeMap<double>
+{
+    static constexpr ImGuiDataType value = ImGuiDataType_Double;
+};
+
+template <>
+struct ImGuiDataTypeMap<long double>
+{
+    // ImGui doesn't have ImGuiDataType_LongDouble, so use Double with conversion
+    static constexpr ImGuiDataType value = ImGuiDataType_Double;
+};
+
+// Template helper to use InputScalar with appropriate data type
+template <typename FloatType>
+struct ImGuiInputHelper
+{
+    static bool input(const char* label, FloatType* v, FloatType step = static_cast<FloatType>(0.0), FloatType step_fast = static_cast<FloatType>(0.0),
+                      const char* format = nullptr)
+    {
+        if constexpr (std::is_same_v<FloatType, long double>)
+        {
+            // For long double, convert to/from double since ImGui doesn't support it directly
+            // Convert format string from long double format to double format if provided
+            const char* double_format = format;
+            if (format != nullptr)
+            {
+                // Replace "%.10Lf" with "%.10f" (remove L modifier for double)
+                // This is a simple approach - format should be something like "%.10Lf"
+                static thread_local char format_buf[16];
+                if (strstr(format, "Lf") != nullptr || strstr(format, "Le") != nullptr)
+                {
+                    // Copy format and replace L with nothing
+                    size_t len = strlen(format);
+                    if (len < sizeof(format_buf))
+                    {
+                        strncpy(format_buf, format, sizeof(format_buf) - 1);
+                        format_buf[sizeof(format_buf) - 1] = '\0';
+                        // Find and replace L
+                        for (char* p = format_buf; *p; ++p)
+                        {
+                            if (*p == 'L' && (p[1] == 'f' || p[1] == 'e' || p[1] == 'g'))
+                            {
+                                // Remove L by shifting
+                                memmove(p, p + 1, strlen(p));
+                                break;
+                            }
+                        }
+                        double_format = format_buf;
+                    }
+                }
+            }
+
+            // Validate input value - if NaN or infinite, use 0
+            double temp = std::isnan(*v) || std::isinf(*v) ? 0.0 : static_cast<double>(*v);
+            double step_d = static_cast<double>(step);
+            double step_fast_d = static_cast<double>(step_fast);
+            bool result = ImGui::InputScalar(label,
+                                             ImGuiDataType_Double,
+                                             &temp,
+                                             step != static_cast<FloatType>(0.0) ? &step_d : nullptr,
+                                             step_fast != static_cast<FloatType>(0.0) ? &step_fast_d : nullptr,
+                                             double_format);
+            // Validate output - ensure we don't get NaN back
+            if (!std::isnan(temp) && !std::isinf(temp))
+            {
+                *v = static_cast<long double>(temp);
+            }
+            return result;
+        }
+        else
+        {
+            // For float and double, use InputScalar directly
+            // Validate input value - if NaN or infinite, reset to 0
+            if (std::isnan(*v) || std::isinf(*v))
+            {
+                *v = static_cast<FloatType>(0.0);
+            }
+            bool result = ImGui::InputScalar(label,
+                                             ImGuiDataTypeMap<FloatType>::value,
+                                             v,
+                                             step != static_cast<FloatType>(0.0) ? &step : nullptr,
+                                             step_fast != static_cast<FloatType>(0.0) ? &step_fast : nullptr,
+                                             format);
+            // Validate output - ensure we don't get NaN back
+            if (std::isnan(*v) || std::isinf(*v))
+            {
+                *v = static_cast<FloatType>(0.0);
+            }
+            return result;
+        }
+    }
+};
+
+template <typename FloatType>
+ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer, TextureUpdateCallback update_callback, TextureDeleteCallback delete_callback)
+    : renderer_(renderer),
+      texture_front_(0),
+      texture_back_(0),
+      width_(0),
+      height_(0),
+      pixels_(nullptr),
+      pixels_being_updated_(nullptr),
+      texture_dirty_(false),
+      double_buffering_enabled_(true),
+      render_generation_(0),
+      pixels_generation_(0),
+      swapped_generation_(UINT_MAX),
+      update_callback_(update_callback),
+      delete_callback_(delete_callback),
+      is_dragging_(false),
+      last_drag_pos_(0.0f, 0.0f),
+      initial_bounds_set_(false),
+      initial_x_min_(static_cast<FloatType>(0.0)),
+      initial_x_max_(static_cast<FloatType>(0.0)),
+      initial_y_min_(static_cast<FloatType>(0.0)),
+      initial_y_max_(static_cast<FloatType>(0.0)),
+      initial_zoom_(1ULL),
+      first_window_size_set_(false),
+      threading_enabled_(true)
 {
 }
 
@@ -121,42 +227,82 @@ void ImGuiRenderer<FloatType>::draw()
             initial_zoom_ = renderer_->get_zoom();
             initial_bounds_set_ = true;
         }
-        
+
         // Display controls using ImGui widgets
-        // ImGui uses float, so we convert from FloatType to float for UI
+        // Use FloatType directly with appropriate ImGui input functions
         bool changed = false;
         int max_iter = renderer_->get_max_iterations();
-        float x_min = static_cast<float>(renderer_->get_x_min());
-        float x_max = static_cast<float>(renderer_->get_x_max());
-        float y_min = static_cast<float>(renderer_->get_y_min());
-        float y_max = static_cast<float>(renderer_->get_y_max());
-        float zoom = static_cast<float>(renderer_->get_zoom());
-        
-        // Get max zoom for clamping (convert to float for ImGui)
-        // Use static const to ensure it's evaluated at compile time
-        static const float max_zoom_float = static_cast<float>(MandelbrotRenderer<FloatType>::max_zoom);
+        FloatType x_min = renderer_->get_x_min();
+        FloatType x_max = renderer_->get_x_max();
+        FloatType y_min = renderer_->get_y_min();
+        FloatType y_max = renderer_->get_y_max();
+        uint64_t zoom = renderer_->get_zoom();
+
+        // Get max zoom for clamping
+        static const uint64_t max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
 
         changed |= ImGui::SliderInt("Max Iterations", &max_iter, 2, 4096, "%d", ImGuiSliderFlags_Logarithmic);
 
-        ImGui::PushItemWidth(100.f);
-        changed |= ImGui::InputFloat("Min X", &x_min, 0.0f, 0.0f, "%.6f");
-        ImGui::SameLine();
-        changed |= ImGui::InputFloat("Max X", &x_max, 0.0f, 0.0f, "%.6f");
-        changed |= ImGui::InputFloat("Min Y", &y_min, 0.0f, 0.0f, "%.6f");
-        ImGui::SameLine();
-        changed |= ImGui::InputFloat("Max Y", &y_max, 0.0f, 0.0f, "%.6f");
+        ImGui::PushItemWidth(120.f);
+        // Use the larger epsilon between float and FloatType - scaled for practical UI use
+        // Epsilon is of FloatType
+        constexpr FloatType eps = std::numeric_limits<FloatType>::epsilon() * static_cast<FloatType>(100.0);
 
-        // Clamp zoom input to max zoom
-        if (zoom > max_zoom_float)
+        // Format string based on FloatType precision
+        // Use higher precision for more significant digits
+        const char* format_str = std::is_same_v<FloatType, long double> ? "%.16Lf" : (std::is_same_v<FloatType, double> ? "%.13f" : "%.8f");
+        FloatType step = static_cast<FloatType>(0.0);
+
+        ImGui::TextUnformatted("Min:");
+        ImGui::SameLine();
+        bool x_min_edited = ImGuiInputHelper<FloatType>::input(",##min_x", &x_min, step, step, format_str);
+        if (x_min_edited && x_min >= x_max)
         {
-            zoom = max_zoom_float;
+            x_min = x_max - eps;
             changed = true;
         }
-        changed |= ImGui::InputFloat("Zoom", &zoom, 0.0f, 0.0f, "%.6f");
-        // Clamp again after input (in case user typed a value)
-        if (zoom > max_zoom_float)
+        changed |= x_min_edited;
+
+        ImGui::SameLine();
+        bool y_min_edited = ImGuiInputHelper<FloatType>::input(",##min_y", &y_min, step, step, format_str);
+        if (y_min_edited && y_min >= y_max)
         {
-            zoom = max_zoom_float;
+            y_min = y_max - eps;
+            changed = true;
+        }
+        changed |= y_min_edited;
+
+        ImGui::TextUnformatted("Max:");
+        ImGui::SameLine();
+
+        bool x_max_edited = ImGuiInputHelper<FloatType>::input(",##max_x", &x_max, step, step, format_str);
+        if (x_max_edited && x_max <= x_min)
+        {
+            x_max = x_min + eps;
+            changed = true;
+        }
+        changed |= x_max_edited;
+
+        ImGui::SameLine();
+        bool y_max_edited = ImGuiInputHelper<FloatType>::input(",##max_y", &y_max, step, step, format_str);
+        if (y_max_edited && y_max <= y_min)
+        {
+            y_max = y_min + eps;
+            changed = true;
+        }
+        changed |= y_max_edited;
+
+        // Clamp zoom input to max zoom
+        if (zoom > max_zoom)
+        {
+            zoom = max_zoom;
+            changed = true;
+        }
+        changed |= ImGui::InputScalar("Zoom", ImGuiDataType_U64, &zoom, nullptr, nullptr, "%llu", ImGuiInputTextFlags_CharsDecimal);
+        // Clamp again after input (in case user typed a value)
+        if (zoom > max_zoom)
+        {
+            zoom = max_zoom;
             changed = true;
         }
         ImGui::PopItemWidth();
@@ -198,28 +344,29 @@ void ImGuiRenderer<FloatType>::draw()
             
             // Check what changed using floating point comparison with epsilon
             // Use FloatType for epsilon to match precision
-            const FloatType eps = static_cast<FloatType>(1e-6);
+            const FloatType eps =
+                std::max(static_cast<FloatType>(std::numeric_limits<float>::epsilon()), std::numeric_limits<FloatType>::epsilon()) * static_cast<FloatType>(100.0);
             FloatType old_x_min = renderer_->get_x_min();
             FloatType old_x_max = renderer_->get_x_max();
             FloatType old_y_min = renderer_->get_y_min();
             FloatType old_y_max = renderer_->get_y_max();
-            FloatType old_zoom = renderer_->get_zoom();
-            
-            bool x_min_changed = std::abs(static_cast<FloatType>(x_min) - old_x_min) > eps;
-            bool x_max_changed = std::abs(static_cast<FloatType>(x_max) - old_x_max) > eps;
-            bool y_min_changed = std::abs(static_cast<FloatType>(y_min) - old_y_min) > eps;
-            bool y_max_changed = std::abs(static_cast<FloatType>(y_max) - old_y_max) > eps;
-            bool zoom_changed = std::abs(static_cast<FloatType>(zoom) - old_zoom) > eps;
+            uint64_t old_zoom = renderer_->get_zoom();
+
+            bool x_min_changed = std::abs(x_min - old_x_min) > eps;
+            bool x_max_changed = std::abs(x_max - old_x_max) > eps;
+            bool y_min_changed = std::abs(y_min - old_y_min) > eps;
+            bool y_max_changed = std::abs(y_max - old_y_max) > eps;
+            bool zoom_changed = (zoom != old_zoom);
             bool bounds_changed = x_min_changed || x_max_changed || y_min_changed || y_max_changed;
             
             if (zoom_changed && !bounds_changed)
             {
                 // Only zoom changed, adjust bounds around center of current view
                 // Clamp zoom to max_zoom
-                FloatType clamped_zoom = std::min(static_cast<FloatType>(zoom), MandelbrotRenderer<FloatType>::max_zoom);
+                uint64_t clamped_zoom = std::min(zoom, MandelbrotRenderer<FloatType>::max_zoom);
                 FloatType center_x = (old_x_min + old_x_max) / static_cast<FloatType>(2.0);
                 FloatType center_y = (old_y_min + old_y_max) / static_cast<FloatType>(2.0);
-                FloatType scale = static_cast<FloatType>(4.0) / clamped_zoom;
+                FloatType scale = static_cast<FloatType>(4.0) / static_cast<FloatType>(clamped_zoom);
                 FloatType new_x_min = center_x - scale / static_cast<FloatType>(2.0);
                 FloatType new_x_max = center_x + scale / static_cast<FloatType>(2.0);
                 FloatType new_y_min = center_y - scale / static_cast<FloatType>(2.0);
@@ -231,11 +378,11 @@ void ImGuiRenderer<FloatType>::draw()
             {
                 // Bounds changed directly - use them exactly as specified
                 // Validate and ensure min < max for both X and Y
-                FloatType final_x_min = static_cast<FloatType>(x_min);
-                FloatType final_x_max = static_cast<FloatType>(x_max);
-                FloatType final_y_min = static_cast<FloatType>(y_min);
-                FloatType final_y_max = static_cast<FloatType>(y_max);
-                
+                FloatType final_x_min = x_min;
+                FloatType final_x_max = x_max;
+                FloatType final_y_min = y_min;
+                FloatType final_y_max = y_max;
+
                 // Ensure min < max
                 if (final_x_min >= final_x_max)
                 {
@@ -257,7 +404,13 @@ void ImGuiRenderer<FloatType>::draw()
                 FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
                 if (avg_range > static_cast<FloatType>(0.0))
                 {
-                    FloatType calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
+                    FloatType calculated_zoom_f = static_cast<FloatType>(4.0) / avg_range;
+                    uint64_t calculated_zoom = static_cast<uint64_t>(calculated_zoom_f);
+                    // Clamp to max_zoom
+                    if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
+                    {
+                        calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+                    }
                     renderer_->set_zoom(calculated_zoom);
                 }
             }
@@ -266,10 +419,10 @@ void ImGuiRenderer<FloatType>::draw()
                 // Only zoom changed (without bounds), adjust bounds around center
                 // This branch should rarely execute since we handle zoom-only above
                 // Clamp zoom to max_zoom
-                FloatType clamped_zoom = std::min(static_cast<FloatType>(zoom), MandelbrotRenderer<FloatType>::max_zoom);
+                uint64_t clamped_zoom = std::min(zoom, MandelbrotRenderer<FloatType>::max_zoom);
                 FloatType center_x = (old_x_min + old_x_max) / static_cast<FloatType>(2.0);
                 FloatType center_y = (old_y_min + old_y_max) / static_cast<FloatType>(2.0);
-                FloatType scale = static_cast<FloatType>(4.0) / clamped_zoom;
+                FloatType scale = static_cast<FloatType>(4.0) / static_cast<FloatType>(clamped_zoom);
                 FloatType new_x_min = center_x - scale / static_cast<FloatType>(2.0);
                 FloatType new_x_max = center_x + scale / static_cast<FloatType>(2.0);
                 FloatType new_y_min = center_y - scale / static_cast<FloatType>(2.0);
@@ -409,7 +562,13 @@ void ImGuiRenderer<FloatType>::draw()
                 
                 render_generation_++;
                 renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                renderer_->set_zoom(static_cast<FloatType>(4.0) / avg_range);
+                FloatType calculated_zoom_f = static_cast<FloatType>(4.0) / avg_range;
+                uint64_t calculated_zoom = static_cast<uint64_t>(calculated_zoom_f);
+                if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
+                {
+                    calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+                }
+                renderer_->set_zoom(calculated_zoom);
                 if (!double_buffering_enabled_)
                 {
                     clear_canvas();
@@ -607,7 +766,29 @@ void ImGuiRenderer<FloatType>::draw()
                         FloatType new_x_max = current_x_max + delta_x;
                         FloatType new_y_min = current_y_min + delta_y;
                         FloatType new_y_max = current_y_max + delta_y;
-                        
+
+                        // Calculate pixel offsets for optimized panning
+                        // Only use panning optimization when double buffering is enabled
+                        // Without double buffering, the canvas may not be reliable for pixel reuse
+                        int pan_dx = 0;
+                        int pan_dy = 0;
+                        if (double_buffering_enabled_)
+                        {
+                            // drag_delta is in screen pixels, and represents how much the mouse moved
+                            // Positive drag_delta.x means dragged right (view moves left, pixels shift right)
+                            // Positive drag_delta.y means dragged down (view moves up, pixels shift down)
+                            // Pixel shift direction matches drag direction to reuse existing pixels
+                            pan_dx = static_cast<int>(std::round(drag_delta.x));
+                            pan_dy = static_cast<int>(std::round(drag_delta.y));
+
+                            // Only use panning if the pan is not too large to reuse existing data
+                            if (std::abs(pan_dx) >= width_ || std::abs(pan_dy) >= height_)
+                            {
+                                pan_dx = 0;
+                                pan_dy = 0;
+                            }
+                        }
+
                         // Update bounds and regenerate
                         render_generation_++;
                         renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
@@ -616,8 +797,8 @@ void ImGuiRenderer<FloatType>::draw()
                             clear_canvas();
                         }
                         ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
-                        renderer_->regenerate(pool);
-                        
+                        renderer_->regenerate(pool, pan_dx, pan_dy);
+
                         // Remember this position so we don't regenerate again until mouse moves more
                         last_drag_pos_ = current_pos;
                     }
@@ -652,9 +833,9 @@ void ImGuiRenderer<FloatType>::draw()
                     FloatType zoom_factor = static_cast<FloatType>(1.0) + static_cast<FloatType>(current_wheel) * static_cast<FloatType>(0.1);
                     
                     // Get max zoom from template constant
-                    constexpr FloatType max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
-                    constexpr FloatType min_range = static_cast<FloatType>(4.0) / max_zoom;
-                    
+                    constexpr uint64_t max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+                    constexpr FloatType min_range = static_cast<FloatType>(4.0) / static_cast<FloatType>(max_zoom);
+
                     // Limit zoom_factor to prevent ranges from going below minimum
                     FloatType max_zoom_factor_x = x_range / min_range;
                     FloatType max_zoom_factor_y = y_range / min_range;
@@ -682,8 +863,9 @@ void ImGuiRenderer<FloatType>::draw()
                     
                     // Update bounds and zoom (zoom is derived from range)
                     FloatType avg_range = (new_x_range + new_y_range) / static_cast<FloatType>(2.0);
-                    FloatType new_zoom = static_cast<FloatType>(4.0) / avg_range;
-                    
+                    FloatType new_zoom_f = static_cast<FloatType>(4.0) / avg_range;
+                    uint64_t new_zoom = static_cast<uint64_t>(new_zoom_f);
+
                     // Clamp zoom to maximum (safety check)
                     if (new_zoom > max_zoom)
                     {
