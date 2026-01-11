@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <cstring>
@@ -71,47 +70,121 @@ void MandelbrotRenderer<FloatType>::set_render_callback(RenderCallback* callback
 template<typename FloatType>
 int MandelbrotRenderer<FloatType>::compute_mandelbrot(::std::complex<FloatType> c, int max_iter) const
 {
-    ::std::complex<FloatType> z(static_cast<FloatType>(0.0), static_cast<FloatType>(0.0));
+    // Optimized: use squared magnitude to avoid sqrt, and expand complex arithmetic manually
+    FloatType zr = static_cast<FloatType>(0.0);
+    FloatType zi = static_cast<FloatType>(0.0);
+    FloatType cr = c.real();
+    FloatType ci = c.imag();
+    constexpr FloatType escape_radius_sq = static_cast<FloatType>(4.0);  // 2.0^2
 
     for (int i = 0; i < max_iter; ++i)
     {
-        if (::std::abs(z) > static_cast<FloatType>(2.0))
+        // Check squared magnitude: |z|^2 > 4 instead of |z| > 2 (avoids sqrt)
+        FloatType magnitude_sq = zr * zr + zi * zi;
+        if (magnitude_sq > escape_radius_sq)
         {
             return i;
         }
-        z = z * z + c;
+
+        // Manual complex multiplication: z = z * z + c
+        // z^2 = (zr + i*zi)^2 = zr^2 - zi^2 + i*2*zr*zi
+        FloatType zr_new = zr * zr - zi * zi + cr;
+        FloatType zi_new = static_cast<FloatType>(2.0) * zr * zi + ci;
+        zr = zr_new;
+        zi = zi_new;
     }
     return max_iter;
 }
 
-template<typename FloatType>
-void MandelbrotRenderer<FloatType>::paint_pixel(int x_pos, int y_pos, const ColorScheme::Color& color)
+template <typename FloatType>
+inline void MandelbrotRenderer<FloatType>::paint_pixel(int x_pos, int y_pos, const ColorScheme::Color& color)
 {
+    // Optimized: precomputed width_*4 can be used in loops, but for single pixel access this is fine
+    // Alpha channel already set to 255 during initialization, only need to set RGB
     int idx = (y_pos * width_ + x_pos) * 4;
     pixels_[idx + 0] = color[0];
     pixels_[idx + 1] = color[1];
     pixels_[idx + 2] = color[2];
-    pixels_[idx + 3] = 255;
+    // Alpha channel (idx + 3) already 255, no need to set
 }
 
-template<typename FloatType>
-int MandelbrotRenderer<FloatType>::process_pixel(int32_t x_pos, int32_t y_pos)
+template <typename FloatType>
+inline int MandelbrotRenderer<FloatType>::process_pixel(int32_t x_pos, int32_t y_pos)
 {
-    int iter = compute_mandelbrot(metrics_.canvas_to_complex(x_pos, y_pos), max_iterations_);
+    // Inline canvas_to_complex to avoid function call overhead
+    FloatType cx = metrics_.x_min + metrics_.pixel_to_x * x_pos;
+    FloatType cy = metrics_.y_min + metrics_.pixel_to_y * y_pos;
+    ::std::complex<FloatType> c(cx, cy);
 
-    auto const& color = iter == max_iterations_ ? ColorScheme::black : palette_.palette[iter % palette_.palette.size()];
-    paint_pixel(x_pos, y_pos, color);
+    int iter = compute_mandelbrot(c, max_iterations_);
+
+    // Cache palette size and optimize color lookup
+    size_t palette_size = palette_.palette.size();
+    auto const& color = iter == max_iterations_ ? ColorScheme::black : palette_.palette[static_cast<size_t>(iter) % palette_size];
+
+    // Inline paint_pixel to avoid function call overhead
+    // Alpha channel already set to 255 during initialization, only need to set RGB
+    int idx = (y_pos * width_ + x_pos) * 4;
+    pixels_[idx + 0] = color[0];
+    pixels_[idx + 1] = color[1];
+    pixels_[idx + 2] = color[2];
+    // Alpha channel (idx + 3) already 255, no need to set
+
     return iter;
 }
 
 template<typename FloatType>
 void MandelbrotRenderer<FloatType>::generate_mandelbrot_direct(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max)
 {
-    for (int32_t x_pos = x_min; x_pos <= x_max; ++x_pos)
+    // Optimize: precompute frequently used values outside loops
+    const FloatType pixel_to_x = metrics_.pixel_to_x;
+    const FloatType pixel_to_y = metrics_.pixel_to_y;
+    const FloatType x_min_coord = metrics_.x_min;
+    const FloatType y_min_coord = metrics_.y_min;
+    const int max_iter = max_iterations_;
+    const size_t palette_size = palette_.palette.size();
+    const int width_4 = width_ * 4;  // Precompute width * 4 for pixel indexing
+    const FloatType escape_radius_sq = static_cast<FloatType>(4.0);
+
+    // Precompute row base offsets to avoid repeated multiplication
+    for (int32_t y_pos = y_min; y_pos <= y_max; ++y_pos)
     {
-        for (int32_t y_pos = y_min; y_pos <= y_max; ++y_pos)
+        const int row_base = y_pos * width_4;
+        const FloatType cy = y_min_coord + pixel_to_y * y_pos;
+
+        for (int32_t x_pos = x_min; x_pos <= x_max; ++x_pos)
         {
-            process_pixel(x_pos, y_pos);
+            // Fully inline all operations for maximum performance
+            FloatType cx = x_min_coord + pixel_to_x * x_pos;
+
+            // Inlined compute_mandelbrot
+            FloatType zr = static_cast<FloatType>(0.0);
+            FloatType zi = static_cast<FloatType>(0.0);
+            int iter = max_iter;
+
+            for (int i = 0; i < max_iter; ++i)
+            {
+                FloatType magnitude_sq = zr * zr + zi * zi;
+                if (magnitude_sq > escape_radius_sq)
+                {
+                    iter = i;
+                    break;
+                }
+
+                FloatType zr_new = zr * zr - zi * zi + cx;
+                FloatType zi_new = static_cast<FloatType>(2.0) * zr * zi + cy;
+                zr = zr_new;
+                zi = zi_new;
+            }
+
+            // Color lookup and pixel painting
+            // Alpha channel already set to 255 during initialization, only need to set RGB
+            const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette_.palette[static_cast<size_t>(iter) % palette_size];
+            int idx = row_base + x_pos * 4;
+            pixels_[idx + 0] = color[0];
+            pixels_[idx + 1] = color[1];
+            pixels_[idx + 2] = color[2];
+            // Alpha channel (idx + 3) already 255, no need to set
         }
     }
 }
@@ -119,22 +192,68 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_direct(int32_t x_min, in
 template<typename FloatType>
 void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, ThreadPool* thread_pool)
 {
+    // Precompute frequently used values to avoid repeated member access
+    const FloatType pixel_to_x = metrics_.pixel_to_x;
+    const FloatType pixel_to_y = metrics_.pixel_to_y;
+    const FloatType x_min_coord = metrics_.x_min;
+    const FloatType y_min_coord = metrics_.y_min;
+    const int max_iter = max_iterations_;
+    const size_t palette_size = palette_.palette.size();
+    const int width_4 = width_ * 4;
+    const FloatType escape_radius_sq = static_cast<FloatType>(4.0);
+
+    // Helper lambda for fast pixel processing (inlined)
+    auto fast_process_pixel = [&](int32_t x_pos, int32_t y_pos) -> int
+    {
+        FloatType cx = x_min_coord + pixel_to_x * x_pos;
+        FloatType cy = y_min_coord + pixel_to_y * y_pos;
+
+        FloatType zr = static_cast<FloatType>(0.0);
+        FloatType zi = static_cast<FloatType>(0.0);
+        int iter = max_iter;
+
+        for (int i = 0; i < max_iter; ++i)
+        {
+            FloatType magnitude_sq = zr * zr + zi * zi;
+            if (magnitude_sq > escape_radius_sq)
+            {
+                iter = i;
+                break;
+            }
+
+            FloatType zr_new = zr * zr - zi * zi + cx;
+            FloatType zi_new = static_cast<FloatType>(2.0) * zr * zi + cy;
+            zr = zr_new;
+            zi = zi_new;
+        }
+
+        const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette_.palette[static_cast<size_t>(iter) % palette_size];
+        int idx = y_pos * width_4 + x_pos * 4;  // Use precomputed width_4
+        pixels_[idx + 0] = color[0];
+        pixels_[idx + 1] = color[1];
+        pixels_[idx + 2] = color[2];
+        // Alpha channel (idx + 3) already 255, no need to set
+
+        return iter;
+    };
+
     bool all_same = true;
-    int const first_iter = process_pixel(x_min, y_min);
+    int const first_iter = fast_process_pixel(x_min, y_min);
 
     // Rest of top horizontal line
     for (int32_t x_pos = x_min + 1; x_pos <= x_max; ++x_pos)
     {
-        if (first_iter != process_pixel(x_pos, y_min))
+        if (first_iter != fast_process_pixel(x_pos, y_min))
         {
             all_same = false;
+            // Early exit not beneficial here as we need to process all boundary pixels anyway
         }
     }
 
     // Bottom horizontal line
     for (int32_t x_pos = x_min; x_pos <= x_max; ++x_pos)
     {
-        if (first_iter != process_pixel(x_pos, y_max))
+        if (first_iter != fast_process_pixel(x_pos, y_max))
         {
             all_same = false;
         }
@@ -143,7 +262,7 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, i
     // Left vertical
     for (int32_t y_pos = y_min + 1; y_pos <= y_max - 1; ++y_pos)
     {
-        if (first_iter != process_pixel(x_min, y_pos))
+        if (first_iter != fast_process_pixel(x_min, y_pos))
         {
             all_same = false;
         }
@@ -152,7 +271,7 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, i
     // Right vertical
     for (int32_t y_pos = y_min + 1; y_pos <= y_max - 1; ++y_pos)
     {
-        if (first_iter != process_pixel(x_max, y_pos))
+        if (first_iter != fast_process_pixel(x_max, y_pos))
         {
             all_same = false;
         }
@@ -161,7 +280,7 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, i
     int inner_d_x = x_max - x_min - 1;
     int inner_d_y = y_max - y_min - 1;
 
-    if (inner_d_x > 0 || inner_d_y > 0)
+    if (inner_d_x > 0 && inner_d_y > 0)
     {
         int new_x_min = x_min + 1;
         int new_x_max = x_max - 1;
@@ -190,14 +309,34 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, i
 
         if (all_same)
         {
-            // Flood fill entire interior
-            auto const& color = first_iter == max_iterations_ ? ColorScheme::black : palette_.palette[first_iter % palette_.palette.size()];
-            for (int32_t x_pos = new_x_min; x_pos <= new_x_max; ++x_pos)
+            // Flood fill entire interior - optimized using first row as pattern
+            const ColorScheme::Color& color = first_iter == max_iter ? ColorScheme::black : palette_.palette[static_cast<size_t>(first_iter) % palette_size];
+            const size_t fill_width = static_cast<size_t>(new_x_max - new_x_min + 1);
+            const size_t fill_bytes = fill_width * 4;
+
+            // Fill first row efficiently - construct pattern once, then duplicate
+            // Alpha channel already 255 from buffer initialization, but we'll include it for memcpy
+            unsigned char* first_row_start = &pixels_[new_y_min * width_4 + new_x_min * 4];
+
+            // Write first pixel completely (RGB + alpha) as the pattern
+            first_row_start[0] = color[0];
+            first_row_start[1] = color[1];
+            first_row_start[2] = color[2];
+            first_row_start[3] = 255;  // Alpha (already 255, but needed for memcpy pattern)
+
+            // Copy the first pixel pattern to all remaining pixels in the row using memcpy
+            // This is much faster than a loop for larger rows
+            // Use size_t to match fill_width - eliminates conversion overhead and matches pointer arithmetic type
+            for (size_t x = 1; x < fill_width; ++x)
             {
-                for (int32_t y_pos = new_y_min; y_pos <= new_y_max; ++y_pos)
-                {
-                    paint_pixel(x_pos, y_pos, color);
-                }
+                std::memcpy(first_row_start + x * 4, first_row_start, 4);
+            }
+
+            // Copy first row to all subsequent rows using memcpy (very fast)
+            for (int32_t y_pos = new_y_min + 1; y_pos <= new_y_max; ++y_pos)
+            {
+                unsigned char* row_start = &pixels_[y_pos * width_4 + new_x_min * 4];
+                std::memcpy(row_start, first_row_start, fill_bytes);
             }
         }
         else
@@ -252,11 +391,19 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot(ThreadPool* thread_pool)
 {
     // Update metrics
     metrics_ = CanvasMetrics<FloatType>(width_, height_, x_min_, x_max_, y_min_, y_max_);
-    
-    // Resize pixel buffer
+
+    // Resize pixel buffer and clear to black with alpha 255
     size_t pixel_count = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 4;
     pixels_.resize(pixel_count);
-    
+    // Clear to black (RGB=0,0,0) with alpha=255 efficiently
+    // First, set everything to 0
+    std::fill(pixels_.begin(), pixels_.end(), 0);
+    // Then set all alpha channels to 255 in one pass
+    for (size_t i = 3; i < pixel_count; i += 4)
+    {
+        pixels_[i] = 255;
+    }
+
     if (thread_pool == nullptr)
     {
         // Direct recursive calls (synchronous)
