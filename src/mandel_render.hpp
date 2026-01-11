@@ -96,6 +96,9 @@ private:
     // Track threading state (controlled by UI checkbox)
     bool threading_enabled_;
 
+    // Recurse size limit
+    int recurse_size_limit_;
+
     // Track controls window transparency state
     bool controls_window_should_be_transparent_;
 

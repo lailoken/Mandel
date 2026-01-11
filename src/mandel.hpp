@@ -109,7 +109,10 @@ public:
     const unsigned char* get_pixels() const { return pixels_.data(); }
     int get_width() const { return width_; }
     int get_height() const { return height_; }
-    
+
+    int get_recurse_size_limit() const { return recurse_size_limit_; }
+    void set_recurse_size_limit(int recurse_size_limit) { recurse_size_limit_ = recurse_size_limit; }
+
     // Get thread pool (for checking completion status)
     ThreadPool* get_thread_pool() { return &thread_pool_; }
     const ThreadPool* get_thread_pool() const { return &thread_pool_; }
@@ -140,6 +143,7 @@ public:
     FloatType y_max_;
     FloatType zoom_;
     int max_iterations_;
+    int recurse_size_limit_;
 
     ::std::vector<unsigned char> pixels_;
     ColorScheme palette_;

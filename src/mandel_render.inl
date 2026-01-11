@@ -152,6 +152,7 @@ ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer,
       initial_max_iterations_(0),
       first_window_size_set_(false),
       threading_enabled_(true),
+      recurse_size_limit_(4),
       controls_window_should_be_transparent_(false),
       has_loaded_current_view_(false)
 {
@@ -805,6 +806,13 @@ void ImGuiRenderer<FloatType>::draw()
             changed |= ImGui::Checkbox("Threading", &threading_enabled_);
             ImGui::SameLine();
             changed |= ImGui::Checkbox("Double Buffering", &double_buffering_enabled_);
+            ImGui::SameLine();
+            ImGui::PushItemWidth(60.f);
+            if (ImGui::SliderInt("Recurse", &recurse_size_limit_, 4, 64, "%d"))
+            {
+                renderer_->set_recurse_size_limit(recurse_size_limit_);
+            }
+            ImGui::PopItemWidth();
 
             ImGui::Text("Render Generation: %d", render_generation_);
 

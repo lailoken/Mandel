@@ -45,6 +45,7 @@ MandelbrotRenderer<FloatType>::MandelbrotRenderer(int width, int height)
       y_max_(static_cast<FloatType>(2.0)),
       zoom_(1ULL),
       max_iterations_(512),
+      recurse_size_limit_(4),
       palette_(32),
       metrics_(width, height, x_min_, x_max_, y_min_, y_max_),
       render_callback_(nullptr)
@@ -341,7 +342,7 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, i
         }
         else
         {
-            if (inner_d_x <= 4 || inner_d_y <= 4)
+            if (inner_d_x <= recurse_size_limit_ || inner_d_y <= recurse_size_limit_)
             {
                 generate_mandelbrot_direct(new_x_min, new_x_max, new_y_min, new_y_max);
             }

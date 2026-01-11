@@ -86,14 +86,21 @@ find_package(OpenGL REQUIRED)
 include_directories(${SDL2_INCLUDE_DIRS})
 include_directories(${OPENGL_INCLUDE_DIRS})
 
+# Fetch nlohmann/json
+include(FetchContent)
+FetchContent_Declare(
+    json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+)
+FetchContent_MakeAvailable(json)
+
 # Check for imgui in external/ first, otherwise fetch it
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui/imgui.h")
     set(imgui_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui")
     message(STATUS "Using imgui from external/imgui")
 else()
     # Fetch imgui
-    include(FetchContent)
-    
     FetchContent_Declare(
         imgui
         GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -141,6 +148,18 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${imgui_SOURCE_DIR}/backends
     ${SDL2_INCLUDE_DIRS}
 )
+
+# Link nlohmann/json (header-only, but provides include directories)
+# Try different possible target names
+if(TARGET nlohmann_json::nlohmann_json)
+    target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json::nlohmann_json)
+elseif(TARGET nlohmann_json)
+    target_link_libraries(${PROJECT_NAME} PRIVATE nlohmann_json)
+elseif(EXISTS "${json_SOURCE_DIR}/include/nlohmann/json.hpp")
+    target_include_directories(${PROJECT_NAME} PRIVATE "${json_SOURCE_DIR}/include")
+elseif(EXISTS "${json_SOURCE_DIR}/single_include/nlohmann/json.hpp")
+    target_include_directories(${PROJECT_NAME} PRIVATE "${json_SOURCE_DIR}/single_include")
+endif()
 
 # Link libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
