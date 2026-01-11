@@ -1,0 +1,68 @@
+--- 
+BasedOnStyle: Google
+AlignTrailingComments: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Allman
+ColumnLimit: 180
+IndentWidth: 4    
+IndentCaseLabels: true
+MaxEmptyLinesToKeep: 1
+PointerBindsToType: false
+SpaceBeforeAssignmentOperators: true
+SpaceInEmptyParentheses: false
+SpacesInParentheses: false
+TabWidth: 4
+UseTab: Never     
+IndentAccessModifiers: false
+AccessModifierOffset: -3
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+BinPackArguments: false
+InsertBraces: true
+SortIncludes: CaseInsensitive
+AllowShortFunctionsOnASingleLine: All
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: 'true'
+AlignEscapedNewlines: Left
+IndentPPDirectives: None
+IndentWrappedFunctionNames: 'true'
+NamespaceIndentation: None
+
+IncludeCategories:
+  - Regex: '<[Ww]indows\.h>'
+    Priority:     1
+    SortPriority: 1
+
+  - Regex:        'imgui\.h'
+    Priority:     2
+    SortPriority: 2
+
+  - Regex:        'imgui_internal\.h'
+    Priority:     2
+    SortPriority: 3
+
+  - Regex:        'imgui_stdlib\.h'
+    Priority:     2
+    SortPriority: 4
+
+  - Regex:        'IconsForkAwesome'
+    Priority:     2
+    SortPriority: 5
+
+  - Regex:        'cpp_utils[/\\]'
+    Priority:     4
+    SortPriority: 20
+
+  - Regex:        'external[/\\]'
+    Priority:     4
+    SortPriority: 21
+
+  - Regex:        '^<'
+    Priority:     3
+    SortPriority: 10
+
+  - Regex:        '.*'
+    Priority:     5
+    SortPriority: 51
