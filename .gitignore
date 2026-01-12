@@ -1,7 +1,4 @@
 build/
-.vscode/launch.json
-.vscode/tasks.json
-.vscode/settings.json
 *.o
 *.a
 *.so

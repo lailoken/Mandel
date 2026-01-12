@@ -27,9 +27,9 @@ ColorScheme::ColorScheme(int count)
     for (int i = 0; i < n; ++i)
     {
         const float t = (static_cast<float>(i) / static_cast<float>(n)) * two_pi;
-        const float rf = 0.5f + 0.5f * ::std::sinf(t + phase_r);
-        const float gf = 0.5f + 0.5f * ::std::sinf(t + phase_g);
-        const float bf = 0.5f + 0.5f * ::std::sinf(t + phase_b);
+        const float rf = 0.5f + 0.5f * ::std::sin(t + phase_r);
+        const float gf = 0.5f + 0.5f * ::std::sin(t + phase_g);
+        const float bf = 0.5f + 0.5f * ::std::sin(t + phase_b);
         palette.push_back(Color{to_u8(rf), to_u8(gf), to_u8(bf)});
     }
 }
