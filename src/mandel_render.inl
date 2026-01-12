@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -20,6 +21,52 @@
 
 namespace mandel
 {
+
+// Template helper to determine JSON storage type for FloatType
+template <typename FloatType>
+struct JsonFloatStorage;
+
+template <>
+struct JsonFloatStorage<float>
+{
+    using type = double;  // nlohmann::json stores all numbers as double
+    static double to_json(float value) { return static_cast<double>(value); }
+    static float from_json(const nlohmann::json& j) { return j.is_string() ? std::strtof(j.get<std::string>().c_str(), nullptr) : static_cast<float>(j.get<double>()); }
+};
+
+template <>
+struct JsonFloatStorage<double>
+{
+    using type = double;
+    static double to_json(double value) { return value; }
+    static double from_json(const nlohmann::json& j) { return j.is_string() ? std::strtod(j.get<std::string>().c_str(), nullptr) : j.get<double>(); }
+};
+
+template <>
+struct JsonFloatStorage<long double>
+{
+    using type = std::string;
+    static std::string to_json(long double value)
+    {
+        std::ostringstream oss;
+        oss.imbue(std::locale::classic());
+        oss.precision(21);  // Use maximum precision for long double (19-21 significant digits)
+        oss << value;
+        return oss.str();
+    }
+    static long double from_json(const nlohmann::json& j)
+    {
+        if (j.is_string())
+        {
+            return std::strtold(j.get<std::string>().c_str(), nullptr);
+        }
+        else
+        {
+            // Old format: stored as number (backward compatibility)
+            return static_cast<long double>(j.get<double>());
+        }
+    }
+};
 
 // Template helper to map FloatType to ImGuiDataType
 template <typename FloatType>
@@ -154,10 +201,14 @@ ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer,
       threading_enabled_(true),
       recurse_size_limit_(4),
       controls_window_should_be_transparent_(false),
-      has_loaded_current_view_(false)
+      has_loaded_current_view_(false),
+      has_pending_settings_(false)
 {
     // Initialize new view name buffer
     new_view_name_buffer_[0] = '\0';
+    // Initialize applied settings (will be updated on first render)
+    applied_settings_ = ViewState<FloatType>();
+    pending_settings_ = ViewState<FloatType>();
     // Load saved views from file on construction
     load_views_from_file();
 }
@@ -252,6 +303,73 @@ void ImGuiRenderer<FloatType>::on_pixels_updated(const unsigned char* pixels, in
     texture_dirty_ = true;
 }
 
+template <typename FloatType>
+void ImGuiRenderer<FloatType>::apply_pending_settings_if_ready()
+{
+    // Only apply pending settings if we have them and render is not in progress
+    if (!has_pending_settings_ || renderer_ == nullptr)
+    {
+        return;
+    }
+
+    // Don't apply if render is in progress
+    if (is_render_in_progress())
+    {
+        return;
+    }
+
+    // Apply the pending settings
+    FloatType x_min = pending_settings_.x_min;
+    FloatType x_max = pending_settings_.x_max;
+    FloatType y_min = pending_settings_.y_min;
+    FloatType y_max = pending_settings_.y_max;
+    int max_iter = pending_settings_.max_iterations;
+
+    // Update applied settings
+    applied_settings_ = pending_settings_;
+    has_pending_settings_ = false;
+
+    // Validate and ensure min < max for both X and Y
+    constexpr FloatType eps = std::numeric_limits<FloatType>::epsilon() * static_cast<FloatType>(100.0);
+    if (x_min >= x_max)
+    {
+        std::swap(x_min, x_max);
+    }
+    if (y_min >= y_max)
+    {
+        std::swap(y_min, y_max);
+    }
+
+    // Calculate zoom from bounds
+    FloatType x_range = x_max - x_min;
+    FloatType y_range = y_max - y_min;
+    FloatType calculated_zoom = static_cast<FloatType>(1.0);
+    if (x_range > static_cast<FloatType>(0.0) && y_range > static_cast<FloatType>(0.0))
+    {
+        FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
+        calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
+        // Clamp to max_zoom (which is FloatType, supports much higher precision than uint64_t)
+        if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
+        {
+            calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+        }
+    }
+
+    // Apply settings to renderer
+    render_generation_++;
+    renderer_->set_bounds(x_min, x_max, y_min, y_max);
+    renderer_->set_zoom(calculated_zoom);
+    renderer_->set_max_iterations(max_iter);
+
+    if (!double_buffering_enabled_)
+    {
+        clear_canvas();
+    }
+
+    ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+    renderer_->regenerate(pool);
+}
+
 template<typename FloatType>
 void ImGuiRenderer<FloatType>::draw()
 {
@@ -317,8 +435,8 @@ void ImGuiRenderer<FloatType>::draw()
                         FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
                         if (avg_range > static_cast<FloatType>(0.0))
                         {
-                            FloatType calculated_zoom_f = static_cast<FloatType>(4.0) / avg_range;
-                            uint64_t calculated_zoom = static_cast<uint64_t>(calculated_zoom_f);
+                            FloatType calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
+                            // Clamp to max_zoom (which is FloatType)
                             if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
                             {
                                 calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
@@ -343,6 +461,13 @@ void ImGuiRenderer<FloatType>::draw()
                 }
                 ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                 renderer_->init(new_width, new_height, pool);
+                // Update applied settings after init (init will trigger first render)
+                // Note: This is done after init completes, so renderer has the correct values
+                if (renderer_ && first_window_size_set_)
+                {
+                    applied_settings_ =
+                        ViewState<FloatType>(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+                }
             }
         }
     }
@@ -623,9 +748,9 @@ void ImGuiRenderer<FloatType>::draw()
                         // Zoom factor (positive wheel = zoom in)
                         FloatType zoom_factor = static_cast<FloatType>(1.0) + static_cast<FloatType>(current_wheel) * static_cast<FloatType>(zoom_step_);
 
-                        // Get max zoom from template constant
-                        constexpr uint64_t max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
-                        constexpr FloatType min_range = static_cast<FloatType>(4.0) / static_cast<FloatType>(max_zoom);
+                        // Get max zoom from template constant (FloatType, not uint64_t)
+                        constexpr FloatType max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+                        constexpr FloatType min_range = static_cast<FloatType>(4.0) / max_zoom;
 
                         // Limit zoom_factor to prevent ranges from going below minimum
                         FloatType max_zoom_factor_x = x_range / min_range;
@@ -653,10 +778,9 @@ void ImGuiRenderer<FloatType>::draw()
 
                         // Update bounds and zoom (zoom is derived from range)
                         FloatType avg_range = (new_x_range + new_y_range) / static_cast<FloatType>(2.0);
-                        FloatType new_zoom_f = static_cast<FloatType>(4.0) / avg_range;
-                        uint64_t new_zoom = static_cast<uint64_t>(new_zoom_f);
+                        FloatType new_zoom = static_cast<FloatType>(4.0) / avg_range;
 
-                        // Clamp zoom to maximum (safety check)
+                        // Clamp zoom to maximum (safety check) - max_zoom is FloatType
                         if (new_zoom > max_zoom)
                         {
                             new_zoom = max_zoom;
@@ -719,19 +843,37 @@ void ImGuiRenderer<FloatType>::draw()
 
             // Display controls using ImGui widgets
             // Use FloatType directly with appropriate ImGui input functions
-            bool changed = false;
-            int max_iter = renderer_->get_max_iterations();
-            FloatType x_min = renderer_->get_x_min();
-            FloatType x_max = renderer_->get_x_max();
-            FloatType y_min = renderer_->get_y_min();
-            FloatType y_max = renderer_->get_y_max();
-            FloatType zoom = renderer_->get_zoom();
+            // Initialize applied_settings_ from renderer if not yet initialized (first frame after render completes)
+            if (applied_settings_.max_iterations == 0 && !is_render_in_progress())
+            {
+                applied_settings_ =
+                    ViewState<FloatType>(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+            }
+
+            // Get current settings (from renderer if no pending, otherwise from pending)
+            int max_iter = has_pending_settings_ ? pending_settings_.max_iterations : renderer_->get_max_iterations();
+            FloatType x_min = has_pending_settings_ ? pending_settings_.x_min : renderer_->get_x_min();
+            FloatType x_max = has_pending_settings_ ? pending_settings_.x_max : renderer_->get_x_max();
+            FloatType y_min = has_pending_settings_ ? pending_settings_.y_min : renderer_->get_y_min();
+            FloatType y_max = has_pending_settings_ ? pending_settings_.y_max : renderer_->get_y_max();
+
+            // Calculate zoom from bounds (always derive from current bounds, not from renderer)
+            FloatType zoom = static_cast<FloatType>(1.0);
+            FloatType x_range = x_max - x_min;
+            FloatType y_range = y_max - y_min;
+            if (x_range > static_cast<FloatType>(0.0) && y_range > static_cast<FloatType>(0.0))
+            {
+                FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
+                zoom = static_cast<FloatType>(4.0) / avg_range;
+            }
 
             // Get max zoom for clamping
             static const FloatType max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
             static const FloatType min_zoom = static_cast<FloatType>(0.1);
 
-            changed |= ImGui::SliderInt("Max Iterations", &max_iter, 2, 4096, "%d", ImGuiSliderFlags_Logarithmic);
+            // Read UI values and check if they differ from applied settings
+            bool settings_changed = false;
+            ImGui::SliderInt("Max Iterations", &max_iter, 2, 4096, "%d", ImGuiSliderFlags_Logarithmic);
 
             ImGui::PushItemWidth(120.f);
             // Use the larger epsilon between float and FloatType - scaled for practical UI use
@@ -745,74 +887,86 @@ void ImGuiRenderer<FloatType>::draw()
 
             ImGui::TextUnformatted("Min:");
             ImGui::SameLine();
-            bool x_min_edited = ImGuiInputHelper<FloatType>::input(",##min_x", &x_min, step, step, format_str);
-            if (x_min_edited && x_min >= x_max)
+            ImGuiInputHelper<FloatType>::input(",##min_x", &x_min, step, step, format_str);
+            if (x_min >= x_max)
             {
-                changed = true;
-                if (x_max <= x_min)
-                {
-                    x_max = x_min + eps;
-                }
+                x_max = x_min + eps;
             }
-            changed |= x_min_edited;
 
             ImGui::SameLine();
-            bool y_min_edited = ImGuiInputHelper<FloatType>::input(",##min_y", &y_min, step, step, format_str);
-            if (y_min_edited)
+            ImGuiInputHelper<FloatType>::input(",##min_y", &y_min, step, step, format_str);
+            if (y_max <= y_min)
             {
-                changed = true;
-                if (y_max <= y_min)
-                {
-                    y_max = y_min + eps;
-                }
+                y_max = y_min + eps;
             }
 
             ImGui::TextUnformatted("Max:");
             ImGui::SameLine();
 
-            bool x_max_edited = ImGuiInputHelper<FloatType>::input(",##max_x", &x_max, step, step, format_str);
-            if (x_max_edited)
+            ImGuiInputHelper<FloatType>::input(",##max_x", &x_max, step, step, format_str);
+            if (x_min >= x_max)
             {
-                changed = true;
-                if (x_min >= x_max)
-                {
-                    x_min = x_max - eps;
-                }
+                x_min = x_max - eps;
             }
 
             ImGui::SameLine();
-            bool y_max_edited = ImGuiInputHelper<FloatType>::input(",##max_y", &y_max, step, step, format_str);
-            if (y_max_edited)
+            ImGuiInputHelper<FloatType>::input(",##max_y", &y_max, step, step, format_str);
+            if (y_min >= y_max)
             {
-                changed = true;
-                if (y_min >= y_max)
-                {
-                    y_min = y_max - eps;
-                }
+                y_min = y_max - eps;
             }
             ImGui::PopItemWidth();
 
+            // Zoom slider - when changed, convert to bounds
+            // Note: We use double for ImGui slider, which may lose precision for long double, but we detect changes directly
             double zoom_d = static_cast<double>(zoom);
             double const min_zoom_d = static_cast<double>(min_zoom);
             double const max_zoom_d = static_cast<double>(max_zoom);
             bool zoom_edited = ImGui::SliderScalar("Zoom", ImGuiDataType_Double, &zoom_d, &min_zoom_d, &max_zoom_d, "%.4f", ImGuiSliderFlags_Logarithmic);
             if (zoom_edited)
             {
-                changed = true;
-                zoom = static_cast<FloatType>(zoom_d);
-                zoom = std::clamp(zoom, min_zoom, max_zoom);
+                FloatType new_zoom = static_cast<FloatType>(zoom_d);
+                new_zoom = std::clamp(new_zoom, min_zoom, max_zoom);
+                // Convert zoom change to bounds change
+                FloatType center_x = (x_min + x_max) / static_cast<FloatType>(2.0);
+                FloatType center_y = (y_min + y_max) / static_cast<FloatType>(2.0);
+                FloatType scale = static_cast<FloatType>(4.0) / new_zoom;
+                x_min = center_x - scale / static_cast<FloatType>(2.0);
+                x_max = center_x + scale / static_cast<FloatType>(2.0);
+                y_min = center_y - scale / static_cast<FloatType>(2.0);
+                y_max = center_y + scale / static_cast<FloatType>(2.0);
+                // Force settings changed when zoom is edited (precision loss in double conversion can make bounds comparison fail)
+                settings_changed = true;
             }
 
-            changed |= ImGui::Checkbox("Threading", &threading_enabled_);
+            ImGui::Checkbox("Threading", &threading_enabled_);
             ImGui::SameLine();
-            changed |= ImGui::Checkbox("Double Buffering", &double_buffering_enabled_);
-            ImGui::SameLine();
-            ImGui::PushItemWidth(60.f);
-            if (ImGui::SliderInt("Recurse", &recurse_size_limit_, 4, 64, "%d"))
+            ImGui::Checkbox("Double Buffering", &double_buffering_enabled_);
+
+            // Compare current UI values with applied settings to detect changes (only if zoom wasn't just edited)
+            if (!zoom_edited)
             {
-                renderer_->set_recurse_size_limit(recurse_size_limit_);
+                const FloatType comparison_eps =
+                    std::max(static_cast<FloatType>(std::numeric_limits<float>::epsilon()), std::numeric_limits<FloatType>::epsilon()) * static_cast<FloatType>(100.0);
+                settings_changed = (max_iter != applied_settings_.max_iterations) || (std::abs(x_min - applied_settings_.x_min) > comparison_eps) ||
+                                   (std::abs(x_max - applied_settings_.x_max) > comparison_eps) || (std::abs(y_min - applied_settings_.y_min) > comparison_eps) ||
+                                   (std::abs(y_max - applied_settings_.y_max) > comparison_eps);
             }
-            ImGui::PopItemWidth();
+
+            // Update pending settings if changed
+            if (settings_changed)
+            {
+                pending_settings_ = ViewState<FloatType>(x_min, x_max, y_min, y_max, max_iter);
+                has_pending_settings_ = true;
+            }
+
+            // ImGui::SameLine();
+            // ImGui::PushItemWidth(80.f);
+            // if (ImGui::SliderInt("Recurse", &recurse_size_limit_, 4, 64, "%d"))
+            // {
+            //     renderer_->set_recurse_size_limit(recurse_size_limit_);
+            // }
+            // ImGui::PopItemWidth();
 
             ImGui::Text("Render Generation: %d", render_generation_);
 
@@ -888,6 +1042,9 @@ void ImGuiRenderer<FloatType>::draw()
                         renderer_->set_max_iterations(initial_max_iterations_);
                         ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                         renderer_->regenerate(pool);
+                        // Update applied settings and clear pending settings
+                        applied_settings_ = ViewState<FloatType>(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_, initial_max_iterations_);
+                        has_pending_settings_ = false;
                     }
                 }
 
@@ -973,127 +1130,8 @@ void ImGuiRenderer<FloatType>::draw()
             }
             ImGui::EndDisabled();
 
-            if (changed)
-            {
-                // Parameters changed - when double-buffering, wait for current render to complete before starting new one
-                if (double_buffering_enabled_ && is_render_in_progress())
-                {
-                    // Defer parameter change render until current render completes
-                    // The changed flag will remain true, so we'll try again next frame
-                }
-                else
-                {
-                    // Parameters changed - increment render generation to mark new render starting
-                    render_generation_++;
-
-                    // Check what changed using floating point comparison with epsilon
-                    // Use FloatType for epsilon to match precision
-                    const FloatType eps =
-                        std::max(static_cast<FloatType>(std::numeric_limits<float>::epsilon()), std::numeric_limits<FloatType>::epsilon()) * static_cast<FloatType>(100.0);
-                    FloatType old_x_min = renderer_->get_x_min();
-                    FloatType old_x_max = renderer_->get_x_max();
-                    FloatType old_y_min = renderer_->get_y_min();
-                    FloatType old_y_max = renderer_->get_y_max();
-                    FloatType old_zoom = renderer_->get_zoom();
-
-                    bool x_min_changed = std::abs(x_min - old_x_min) > eps;
-                    bool x_max_changed = std::abs(x_max - old_x_max) > eps;
-                    bool y_min_changed = std::abs(y_min - old_y_min) > eps;
-                    bool y_max_changed = std::abs(y_max - old_y_max) > eps;
-                    bool zoom_changed = (zoom != old_zoom);
-                    bool bounds_changed = x_min_changed || x_max_changed || y_min_changed || y_max_changed;
-
-                    if (zoom_changed && !bounds_changed)
-                    {
-                        // Only zoom changed, adjust bounds around center of current view
-                        // Clamp zoom to max_zoom
-                        FloatType center_x = (old_x_min + old_x_max) / static_cast<FloatType>(2.0);
-                        FloatType center_y = (old_y_min + old_y_max) / static_cast<FloatType>(2.0);
-                        FloatType scale = static_cast<FloatType>(4.0) / zoom;
-                        FloatType new_x_min = center_x - scale / static_cast<FloatType>(2.0);
-                        FloatType new_x_max = center_x + scale / static_cast<FloatType>(2.0);
-                        FloatType new_y_min = center_y - scale / static_cast<FloatType>(2.0);
-                        FloatType new_y_max = center_y + scale / static_cast<FloatType>(2.0);
-                        renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                        renderer_->set_zoom(zoom);
-                    }
-                    else if (bounds_changed)
-                    {
-                        // Bounds changed directly - use them exactly as specified
-                        // Validate and ensure min < max for both X and Y
-                        FloatType final_x_min = x_min;
-                        FloatType final_x_max = x_max;
-                        FloatType final_y_min = y_min;
-                        FloatType final_y_max = y_max;
-
-                        // Ensure min < max
-                        if (final_x_min >= final_x_max)
-                        {
-                            // Invalid range, swap them
-                            std::swap(final_x_min, final_x_max);
-                        }
-                        if (final_y_min >= final_y_max)
-                        {
-                            // Invalid range, swap them
-                            std::swap(final_y_min, final_y_max);
-                        }
-
-                        // Set bounds exactly as specified (or corrected)
-                        renderer_->set_bounds(final_x_min, final_x_max, final_y_min, final_y_max);
-
-                        // Calculate zoom from average range for display purposes only (doesn't affect rendering)
-                        FloatType x_range = final_x_max - final_x_min;
-                        FloatType y_range = final_y_max - final_y_min;
-                        FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
-                        if (avg_range > static_cast<FloatType>(0.0))
-                        {
-                            FloatType calculated_zoom_f = static_cast<FloatType>(4.0) / avg_range;
-                            uint64_t calculated_zoom = static_cast<uint64_t>(calculated_zoom_f);
-                            // Clamp to max_zoom
-                            if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
-                            {
-                                calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
-                            }
-                            renderer_->set_zoom(calculated_zoom);
-                        }
-                    }
-                    else if (zoom_changed)
-                    {
-                        // Only zoom changed (without bounds), adjust bounds around center
-                        // This branch should rarely execute since we handle zoom-only above
-                        // Clamp zoom to max_zoom
-                        uint64_t clamped_zoom = std::min(zoom, MandelbrotRenderer<FloatType>::max_zoom);
-                        FloatType center_x = (old_x_min + old_x_max) / static_cast<FloatType>(2.0);
-                        FloatType center_y = (old_y_min + old_y_max) / static_cast<FloatType>(2.0);
-                        FloatType scale = static_cast<FloatType>(4.0) / static_cast<FloatType>(clamped_zoom);
-                        FloatType new_x_min = center_x - scale / static_cast<FloatType>(2.0);
-                        FloatType new_x_max = center_x + scale / static_cast<FloatType>(2.0);
-                        FloatType new_y_min = center_y - scale / static_cast<FloatType>(2.0);
-                        FloatType new_y_max = center_y + scale / static_cast<FloatType>(2.0);
-                        renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                        renderer_->set_zoom(clamped_zoom);
-                    }
-
-                    // Double-check one more time right before we actually start the render
-                    // This prevents race conditions where a render might have started between checks
-                    if (double_buffering_enabled_ && is_render_in_progress())
-                    {
-                        // Render started between checks, defer parameter change render until next frame
-                        // The changed flag will remain true, so we'll try again next frame
-                    }
-                    else
-                    {
-                        renderer_->set_max_iterations(max_iter);
-                        if (!double_buffering_enabled_)
-                        {
-                            clear_canvas();
-                        }
-                        // Pass thread pool if threading is enabled, otherwise pass nullptr
-                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
-                        renderer_->regenerate(pool);
-                    }
-                }
-            }
+            // Try to apply pending settings if render is ready
+            apply_pending_settings_if_ready();
         }
     }
     ImGui::End();
@@ -1203,6 +1241,9 @@ void ImGuiRenderer<FloatType>::draw()
         }
     }
 
+    // Try to apply pending settings after checking buffer swap (another opportunity if render just completed)
+    apply_pending_settings_if_ready();
+
     // Views are saved immediately on manual edits, not here
 }
 
@@ -1246,8 +1287,8 @@ void ImGuiRenderer<FloatType>::apply_view_state(const ViewState<FloatType>& stat
     FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
     if (avg_range > static_cast<FloatType>(0.0))
     {
-        FloatType calculated_zoom_f = static_cast<FloatType>(4.0) / avg_range;
-        uint64_t calculated_zoom = static_cast<uint64_t>(calculated_zoom_f);
+        FloatType calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
+        // Clamp to max_zoom (which is FloatType)
         if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
         {
             calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
@@ -1256,6 +1297,9 @@ void ImGuiRenderer<FloatType>::apply_view_state(const ViewState<FloatType>& stat
     }
     ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
     renderer_->regenerate(pool);
+    // Update applied settings and clear pending settings (view state takes precedence)
+    applied_settings_ = state;
+    has_pending_settings_ = false;
 }
 
 template <typename FloatType>
@@ -1303,10 +1347,10 @@ void ImGuiRenderer<FloatType>::save_views_to_file(bool include_current_view)
         {
             nlohmann::json view_obj;
             view_obj["name"] = name;
-            view_obj["x_min"] = static_cast<double>(state.x_min);
-            view_obj["x_max"] = static_cast<double>(state.x_max);
-            view_obj["y_min"] = static_cast<double>(state.y_min);
-            view_obj["y_max"] = static_cast<double>(state.y_max);
+            view_obj["x_min"] = JsonFloatStorage<FloatType>::to_json(state.x_min);
+            view_obj["x_max"] = JsonFloatStorage<FloatType>::to_json(state.x_max);
+            view_obj["y_min"] = JsonFloatStorage<FloatType>::to_json(state.y_min);
+            view_obj["y_max"] = JsonFloatStorage<FloatType>::to_json(state.y_max);
             view_obj["max_iterations"] = state.max_iterations;
             json_data["views"].push_back(view_obj);
         }
@@ -1315,10 +1359,10 @@ void ImGuiRenderer<FloatType>::save_views_to_file(bool include_current_view)
         if (include_current_view && renderer_ != nullptr)
         {
             nlohmann::json current_view;
-            current_view["x_min"] = static_cast<double>(renderer_->get_x_min());
-            current_view["x_max"] = static_cast<double>(renderer_->get_x_max());
-            current_view["y_min"] = static_cast<double>(renderer_->get_y_min());
-            current_view["y_max"] = static_cast<double>(renderer_->get_y_max());
+            current_view["x_min"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_x_min());
+            current_view["x_max"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_x_max());
+            current_view["y_min"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_y_min());
+            current_view["y_max"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_y_max());
             current_view["max_iterations"] = renderer_->get_max_iterations();
             json_data["current_view"] = current_view;
         }
@@ -1361,10 +1405,10 @@ void ImGuiRenderer<FloatType>::load_views_from_file()
                     view_obj.contains("max_iterations"))
                 {
                     std::string name = view_obj["name"];
-                    FloatType x_min = static_cast<FloatType>(view_obj["x_min"].get<double>());
-                    FloatType x_max = static_cast<FloatType>(view_obj["x_max"].get<double>());
-                    FloatType y_min = static_cast<FloatType>(view_obj["y_min"].get<double>());
-                    FloatType y_max = static_cast<FloatType>(view_obj["y_max"].get<double>());
+                    FloatType x_min = JsonFloatStorage<FloatType>::from_json(view_obj["x_min"]);
+                    FloatType x_max = JsonFloatStorage<FloatType>::from_json(view_obj["x_max"]);
+                    FloatType y_min = JsonFloatStorage<FloatType>::from_json(view_obj["y_min"]);
+                    FloatType y_max = JsonFloatStorage<FloatType>::from_json(view_obj["y_max"]);
                     int max_iter = view_obj["max_iterations"];
                     saved_views_[name] = ViewState<FloatType>(x_min, x_max, y_min, y_max, max_iter);
                 }
@@ -1378,10 +1422,10 @@ void ImGuiRenderer<FloatType>::load_views_from_file()
             if (current_view.contains("x_min") && current_view.contains("x_max") && current_view.contains("y_min") && current_view.contains("y_max") &&
                 current_view.contains("max_iterations"))
             {
-                FloatType x_min = static_cast<FloatType>(current_view["x_min"].get<double>());
-                FloatType x_max = static_cast<FloatType>(current_view["x_max"].get<double>());
-                FloatType y_min = static_cast<FloatType>(current_view["y_min"].get<double>());
-                FloatType y_max = static_cast<FloatType>(current_view["y_max"].get<double>());
+                FloatType x_min = JsonFloatStorage<FloatType>::from_json(current_view["x_min"]);
+                FloatType x_max = JsonFloatStorage<FloatType>::from_json(current_view["x_max"]);
+                FloatType y_min = JsonFloatStorage<FloatType>::from_json(current_view["y_min"]);
+                FloatType y_max = JsonFloatStorage<FloatType>::from_json(current_view["y_max"]);
                 int max_iter = current_view["max_iterations"];
 
                 // Store the loaded current view to apply after initialization

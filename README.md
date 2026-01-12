@@ -22,12 +22,29 @@ sudo dnf install cmake gcc-c++ SDL2-devel mesa-libGL-devel
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
 ```
 
+For static linking (reduces runtime dependencies):
+```bash
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DSTATIC_LINKING=ON
+```
+
 2. Build:
 ```bash
 cmake --build build
 ```
 
-The executable will be in `build/bin/Mandel`.
+The executable will be in `build/` (or `build/Debug/`/`build/Release/` depending on your generator and build type).
+
+### Static Linking Notes
+
+- **SDL2**: Will be statically linked if static libraries are available
+- **OpenGL**: Remains dynamically linked for driver compatibility (this is standard and recommended)
+- **ImGui**: Already compiled from source, so it's always statically linked
+- **System libraries** (pthread, dl): Required system libraries that are linked appropriately
+
+To build a statically linked binary:
+- Install SDL2 static development libraries if available (e.g., `libsdl2-dev` package should include static libs, or build SDL2 from source)
+- Configure with `-DSTATIC_LINKING=ON`
+- Note: You'll still need OpenGL runtime libraries (`libopengl0` or Mesa) on the target system
 
 ## ImGui Setup
 

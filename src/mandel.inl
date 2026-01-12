@@ -390,6 +390,13 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot_recurse(int32_t x_min, i
 template<typename FloatType>
 void MandelbrotRenderer<FloatType>::generate_mandelbrot(ThreadPool* thread_pool)
 {
+    // CRITICAL: Ensure all threads have completed before resizing pixels_
+    // This prevents race conditions where threads are accessing pixels_ while we're resizing it
+    if (thread_pool != nullptr && thread_pool->is_running() && !thread_pool->is_idle())
+    {
+        thread_pool->reset();  // Wait for all tasks to complete
+    }
+
     // Update metrics
     metrics_ = CanvasMetrics<FloatType>(width_, height_, x_min_, x_max_, y_min_, y_max_);
 
@@ -412,9 +419,11 @@ void MandelbrotRenderer<FloatType>::generate_mandelbrot(ThreadPool* thread_pool)
     }
     else
     {
-        // Use thread pool
-        thread_pool->reset();
-        thread_pool->start();
+        // Use thread pool (start if it was reset above, or if it's not running)
+        if (!thread_pool->is_running())
+        {
+            thread_pool->start();
+        }
         MandelbrotRenderer<FloatType>* self = this;
         thread_pool->add_task([=]() { self->generate_mandelbrot_recurse(0, width_ - 1, 0, height_ - 1, thread_pool); });
     }
@@ -428,6 +437,21 @@ void MandelbrotRenderer<FloatType>::regenerate(ThreadPool* thread_pool, int pan_
 
     if (is_panning && !pixels_.empty() && width_ > 0 && height_ > 0)
     {
+        // CRITICAL: Ensure all threads have completed before modifying pixels_
+        // This prevents race conditions where threads are writing to pixels_ while we're shifting/copying it
+        if (thread_pool != nullptr)
+        {
+            if (thread_pool->is_running() && !thread_pool->is_idle())
+            {
+                thread_pool->reset();  // Wait for all tasks to complete
+            }
+            // Ensure thread pool is running so generate_mandelbrot_recurse can submit tasks
+            if (!thread_pool->is_running())
+            {
+                thread_pool->start();
+            }
+        }
+
         // Panning: shift existing pixels and regenerate only exposed regions
         // Clamp pan offsets to valid range
         pan_dx = std::clamp(pan_dx, -width_ + 1, width_ - 1);

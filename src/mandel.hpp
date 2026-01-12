@@ -38,7 +38,7 @@ struct max_zoom_trait<double>
 template<>
 struct max_zoom_trait<long double>
 {
-    static constexpr long double value = 100000000000000000.0L;  // Higher precision for long double (7e18)
+    static constexpr long double value = 1000000000000000.0L;  // Higher precision for long double (7e18)
 };
 
 template <typename FloatType>

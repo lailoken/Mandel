@@ -108,6 +108,13 @@ private:
     bool views_need_save_;                      // Flag to track if views need to be saved
     ViewState<FloatType> loaded_current_view_;  // Current view loaded from file
     bool has_loaded_current_view_;              // Flag to track if we've loaded a current view
+
+    // Pending settings management (for when render is in progress)
+    ViewState<FloatType> applied_settings_;  // Last applied settings (for comparison)
+    ViewState<FloatType> pending_settings_;  // Pending settings waiting to be applied
+    bool has_pending_settings_;              // Flag indicating if there are pending settings
+
+    void apply_pending_settings_if_ready();  // Check if render is done and apply pending settings
 };
 
 }  // namespace mandel
