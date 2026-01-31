@@ -1,15 +1,18 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 #include <complex>
 #include <array>
-#include <type_traits>
 
 #include "thread_pool.hpp"
 
 namespace mandel
 {
+
+// Use long double as the underlying floating point type
+using FloatType = long double;
 
 // Render callback interface (defined here to avoid circular dependencies)
 struct RenderCallback
@@ -19,33 +22,10 @@ struct RenderCallback
     virtual void on_pixels_updated(const unsigned char* pixels, int width, int height) = 0;
 };
 
-// Type trait to determine max zoom based on floating point type
-template<typename FloatType>
-struct max_zoom_trait;
-
-template<>
-struct max_zoom_trait<float>
-{
-    static constexpr float value = 1000000.0f;  // Lower precision for float (1e6)
-};
-
-template<>
-struct max_zoom_trait<double>
-{
-    static constexpr double value = 70000000000000.0;  // Tested maximum before visible errors: 70113537556480, rounded to 7e13
-};
-
-template<>
-struct max_zoom_trait<long double>
-{
-    static constexpr long double value = 1000000000000000.0L;  // Higher precision for long double (7e18)
-};
-
-template <typename FloatType>
-inline constexpr FloatType max_zoom_v = max_zoom_trait<FloatType>::value;
+// Maximum zoom level for long double precision
+inline constexpr FloatType max_zoom_v = 1000000000000000.0L;  // Higher precision for long double (1e15)
 
 // Internal structures
-template<typename FloatType>
 struct CanvasMetrics
 {
     int width;
@@ -70,12 +50,9 @@ struct ColorScheme
     static constexpr Color black{0, 0, 0};
 };
 
-template<typename FloatType>
 class MandelbrotRenderer
 {
 public:
-    static_assert(std::is_floating_point_v<FloatType>, "FloatType must be a floating point type (float, double, or long double)");
-
     MandelbrotRenderer(int width = 800, int height = 600);
     ~MandelbrotRenderer() = default;
 
@@ -110,9 +87,6 @@ public:
     int get_width() const { return width_; }
     int get_height() const { return height_; }
 
-    int get_recurse_size_limit() const { return recurse_size_limit_; }
-    void set_recurse_size_limit(int recurse_size_limit) { recurse_size_limit_ = recurse_size_limit; }
-
     // Get thread pool (for checking completion status)
     ThreadPool* get_thread_pool() { return &thread_pool_; }
     const ThreadPool* get_thread_pool() const { return &thread_pool_; }
@@ -123,7 +97,7 @@ public:
     static constexpr FloatType default_y_max = static_cast<FloatType>(2.0);
     
     // Maximum zoom level based on floating point type precision
-    static constexpr FloatType max_zoom = max_zoom_v<FloatType>;
+    static constexpr FloatType max_zoom = max_zoom_v;
 
  private:
     // Internal methods
@@ -131,7 +105,7 @@ public:
     void paint_pixel(int x_pos, int y_pos, const ColorScheme::Color& color);
     int process_pixel(int32_t x_pos, int32_t y_pos);
     void generate_mandelbrot_direct(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max);
-    void generate_mandelbrot_recurse(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, ThreadPool* thread_pool = nullptr);
+    void generate_mandelbrot_recurse(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, ThreadPool* thread_pool, unsigned int generation);
     void generate_mandelbrot(ThreadPool* thread_pool = nullptr);
 
     // Member variables
@@ -143,22 +117,16 @@ public:
     FloatType y_max_;
     FloatType zoom_;
     int max_iterations_;
-    int recurse_size_limit_;
 
     ::std::vector<unsigned char> pixels_;
     ColorScheme palette_;
-    CanvasMetrics<FloatType> metrics_;
+    CanvasMetrics metrics_;
 
     ThreadPool thread_pool_;
     RenderCallback* render_callback_;
+    
+    // Generation counter to track render versions and ignore stale callbacks
+    std::atomic<unsigned int> render_generation_{0};
 };
 
-// Common type aliases
-using MandelbrotRendererFloat = MandelbrotRenderer<float>;
-using MandelbrotRendererDouble = MandelbrotRenderer<double>;
-using MandelbrotRendererLongDouble = MandelbrotRenderer<long double>;
-
 }  // namespace mandel
-
-// Include template implementation
-#include "mandel.inl"

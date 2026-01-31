@@ -1,10 +1,8 @@
-#ifndef MANDEL_RENDER_INL
-#define MANDEL_RENDER_INL
+#include "mandel_render.hpp"
 
 #include "imgui.h"
 
 #include <algorithm>
-#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -12,41 +10,16 @@
 #include <limits>
 #include <sstream>
 #include <string>
-#include <type_traits>
-#include <vector>
-
 #include "mandel.hpp"
-#include "mandel_render.hpp"
 #include "thread_pool.hpp"
 
 namespace mandel
 {
 
-// Template helper to determine JSON storage type for FloatType
-template <typename FloatType>
-struct JsonFloatStorage;
-
-template <>
-struct JsonFloatStorage<float>
+// JSON float storage helpers for long double
+namespace detail
 {
-    using type = double;  // nlohmann::json stores all numbers as double
-    static double to_json(float value) { return static_cast<double>(value); }
-    static float from_json(const nlohmann::json& j) { return j.is_string() ? std::strtof(j.get<std::string>().c_str(), nullptr) : static_cast<float>(j.get<double>()); }
-};
-
-template <>
-struct JsonFloatStorage<double>
-{
-    using type = double;
-    static double to_json(double value) { return value; }
-    static double from_json(const nlohmann::json& j) { return j.is_string() ? std::strtod(j.get<std::string>().c_str(), nullptr) : j.get<double>(); }
-};
-
-template <>
-struct JsonFloatStorage<long double>
-{
-    using type = std::string;
-    static std::string to_json(long double value)
+    std::string float_to_json(FloatType value)
     {
         std::ostringstream oss;
         oss.imbue(std::locale::classic());
@@ -54,7 +27,8 @@ struct JsonFloatStorage<long double>
         oss << value;
         return oss.str();
     }
-    static long double from_json(const nlohmann::json& j)
+
+    FloatType float_from_json(const nlohmann::json& j)
     {
         if (j.is_string())
         {
@@ -63,133 +37,88 @@ struct JsonFloatStorage<long double>
         else
         {
             // Old format: stored as number (backward compatibility)
-            return static_cast<long double>(j.get<double>());
+            return static_cast<FloatType>(j.get<double>());
         }
     }
-};
+}
 
-// Template helper to map FloatType to ImGuiDataType
-template <typename FloatType>
-struct ImGuiDataTypeMap;
-
-template <>
-struct ImGuiDataTypeMap<float>
+// ImGui input helper for long double (convert to/from double since ImGui doesn't support long double)
+namespace detail
 {
-    static constexpr ImGuiDataType value = ImGuiDataType_Float;
-};
-
-template <>
-struct ImGuiDataTypeMap<double>
-{
-    static constexpr ImGuiDataType value = ImGuiDataType_Double;
-};
-
-template <>
-struct ImGuiDataTypeMap<long double>
-{
-    // ImGui doesn't have ImGuiDataType_LongDouble, so use Double with conversion
-    static constexpr ImGuiDataType value = ImGuiDataType_Double;
-};
-
-// Template helper to use InputScalar with appropriate data type
-template <typename FloatType>
-struct ImGuiInputHelper
-{
-    static bool input(const char* label, FloatType* v, FloatType step = static_cast<FloatType>(0.0), FloatType step_fast = static_cast<FloatType>(0.0),
-                      const char* format = nullptr)
+    bool imgui_input_float(const char* label, FloatType* v, FloatType step, FloatType step_fast, const char* format)
     {
-        if constexpr (std::is_same_v<FloatType, long double>)
+        // For long double, convert to/from double since ImGui doesn't support it directly
+        // Convert format string from long double format to double format if provided
+        const char* double_format = format;
+        if (format != nullptr)
         {
-            // For long double, convert to/from double since ImGui doesn't support it directly
-            // Convert format string from long double format to double format if provided
-            const char* double_format = format;
-            if (format != nullptr)
+            // Replace "%.10Lf" with "%.10f" (remove L modifier for double)
+            // This is a simple approach - format should be something like "%.10Lf"
+            static thread_local char format_buf[16];
+            if (strstr(format, "Lf") != nullptr || strstr(format, "Le") != nullptr)
             {
-                // Replace "%.10Lf" with "%.10f" (remove L modifier for double)
-                // This is a simple approach - format should be something like "%.10Lf"
-                static thread_local char format_buf[16];
-                if (strstr(format, "Lf") != nullptr || strstr(format, "Le") != nullptr)
+                // Copy format and replace L with nothing
+                size_t len = strlen(format);
+                if (len < sizeof(format_buf))
                 {
-                    // Copy format and replace L with nothing
-                    size_t len = strlen(format);
-                    if (len < sizeof(format_buf))
+                    strncpy(format_buf, format, sizeof(format_buf) - 1);
+                    format_buf[sizeof(format_buf) - 1] = '\0';
+                    // Find and replace L
+                    for (char* p = format_buf; *p; ++p)
                     {
-                        strncpy(format_buf, format, sizeof(format_buf) - 1);
-                        format_buf[sizeof(format_buf) - 1] = '\0';
-                        // Find and replace L
-                        for (char* p = format_buf; *p; ++p)
+                        if (*p == 'L' && (p[1] == 'f' || p[1] == 'e' || p[1] == 'g'))
                         {
-                            if (*p == 'L' && (p[1] == 'f' || p[1] == 'e' || p[1] == 'g'))
-                            {
-                                // Remove L by shifting
-                                memmove(p, p + 1, strlen(p));
-                                break;
-                            }
+                            // Remove L by shifting
+                            memmove(p, p + 1, strlen(p));
+                            break;
                         }
-                        double_format = format_buf;
                     }
+                    double_format = format_buf;
                 }
             }
-
-            // Validate input value - if NaN or infinite, use 0
-            double temp = std::isnan(*v) || std::isinf(*v) ? 0.0 : static_cast<double>(*v);
-            double step_d = static_cast<double>(step);
-            double step_fast_d = static_cast<double>(step_fast);
-            bool result = ImGui::InputScalar(label,
-                                             ImGuiDataType_Double,
-                                             &temp,
-                                             step != static_cast<FloatType>(0.0) ? &step_d : nullptr,
-                                             step_fast != static_cast<FloatType>(0.0) ? &step_fast_d : nullptr,
-                                             double_format);
-            // Validate output - ensure we don't get NaN back
-            if (!std::isnan(temp) && !std::isinf(temp))
-            {
-                *v = static_cast<long double>(temp);
-            }
-            return result;
         }
-        else
+
+        // Validate input value - if NaN or infinite, use 0
+        double temp = std::isnan(*v) || std::isinf(*v) ? 0.0 : static_cast<double>(*v);
+        double step_d = static_cast<double>(step);
+        double step_fast_d = static_cast<double>(step_fast);
+        bool result = ImGui::InputScalar(label,
+                                         ImGuiDataType_Double,
+                                         &temp,
+                                         step != static_cast<FloatType>(0.0) ? &step_d : nullptr,
+                                         step_fast != static_cast<FloatType>(0.0) ? &step_fast_d : nullptr,
+                                         double_format);
+        // Validate output - ensure we don't get NaN back
+        if (!std::isnan(temp) && !std::isinf(temp))
         {
-            // For float and double, use InputScalar directly
-            // Validate input value - if NaN or infinite, reset to 0
-            if (std::isnan(*v) || std::isinf(*v))
-            {
-                *v = static_cast<FloatType>(0.0);
-            }
-            bool result = ImGui::InputScalar(label,
-                                             ImGuiDataTypeMap<FloatType>::value,
-                                             v,
-                                             step != static_cast<FloatType>(0.0) ? &step : nullptr,
-                                             step_fast != static_cast<FloatType>(0.0) ? &step_fast : nullptr,
-                                             format);
-            // Validate output - ensure we don't get NaN back
-            if (std::isnan(*v) || std::isinf(*v))
-            {
-                *v = static_cast<FloatType>(0.0);
-            }
-            return result;
+            *v = static_cast<FloatType>(temp);
         }
+        return result;
     }
-};
+}
 
-template <typename FloatType>
-ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer, TextureUpdateCallback update_callback, TextureDeleteCallback delete_callback)
+ImGuiRenderer::ImGuiRenderer(MandelbrotRenderer* renderer, TextureUpdateCallback update_callback, TextureDeleteCallback delete_callback)
     : renderer_(renderer),
       texture_front_(0),
       texture_back_(0),
       width_(0),
       height_(0),
       pixels_(nullptr),
-      pixels_being_updated_(nullptr),
       texture_dirty_(false),
-      double_buffering_enabled_(true),
       render_generation_(0),
-      pixels_generation_(0),
-      swapped_generation_(UINT_MAX),
       update_callback_(update_callback),
       delete_callback_(delete_callback),
       is_dragging_(false),
       last_drag_pos_(0.0f, 0.0f),
+      display_offset_x_(0.0f),
+      display_offset_y_(0.0f),
+      render_start_offset_x_(0.0f),
+      render_start_offset_y_(0.0f),
+      display_scale_(1.0f),
+      zoom_center_x_(0.0f),
+      zoom_center_y_(0.0f),
+      suppress_texture_updates_(false),
+      is_rendering_(false),
       initial_bounds_set_(false),
       initial_x_min_(static_cast<FloatType>(0.0)),
       initial_x_max_(static_cast<FloatType>(0.0)),
@@ -199,7 +128,6 @@ ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer,
       initial_max_iterations_(0),
       first_window_size_set_(false),
       threading_enabled_(true),
-      recurse_size_limit_(4),
       controls_window_should_be_transparent_(false),
       has_loaded_current_view_(false),
       has_pending_settings_(false)
@@ -207,14 +135,13 @@ ImGuiRenderer<FloatType>::ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer,
     // Initialize new view name buffer
     new_view_name_buffer_[0] = '\0';
     // Initialize applied settings (will be updated on first render)
-    applied_settings_ = ViewState<FloatType>();
-    pending_settings_ = ViewState<FloatType>();
+    applied_settings_ = ViewState();
+    pending_settings_ = ViewState();
     // Load saved views from file on construction
     load_views_from_file();
 }
 
-template<typename FloatType>
-ImGuiRenderer<FloatType>::~ImGuiRenderer()
+ImGuiRenderer::~ImGuiRenderer()
 {
     // Save current view and all views before destroying (include_current_view = true)
     save_views_to_file(true);
@@ -232,46 +159,16 @@ ImGuiRenderer<FloatType>::~ImGuiRenderer()
     }
 }
 
-template<typename FloatType>
-void ImGuiRenderer<FloatType>::swap_buffers()
-{
-    // Swap front and back buffers
-    ImTextureID temp = texture_front_;
-    texture_front_ = texture_back_;
-    texture_back_ = temp;
-}
-
-template<typename FloatType>
-void ImGuiRenderer<FloatType>::clear_canvas()
-{
-    // Clear the canvas by updating the front texture with black pixels
-    // This is only used when double buffering is disabled
-    if (!double_buffering_enabled_ && texture_front_ != 0 && update_callback_ != nullptr && 
-        renderer_ != nullptr && renderer_->get_width() > 0 && renderer_->get_height() > 0)
-    {
-        int width = renderer_->get_width();
-        int height = renderer_->get_height();
-        size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
-        
-        // Create temporary black pixel buffer
-        std::vector<unsigned char> black_pixels(pixel_count, 0);
-        
-        // Update the texture with black pixels
-        update_callback_(&texture_front_, black_pixels.data(), width, height);
-    }
-}
-
-template <typename FloatType>
-bool ImGuiRenderer<FloatType>::is_render_in_progress() const
+bool ImGuiRenderer::is_render_in_progress() const
 {
     if (renderer_ == nullptr)
     {
         return false;
     }
 
-    // Check if texture is dirty - this indicates pixels are being updated
-    // This works for both threaded and non-threaded rendering
-    if (texture_dirty_)
+    // When suppressing texture updates, don't use texture_dirty_ as indicator
+    // (it will stay true until we upload on completion)
+    if (!suppress_texture_updates_ && texture_dirty_)
     {
         return true;
     }
@@ -281,30 +178,23 @@ bool ImGuiRenderer<FloatType>::is_render_in_progress() const
         ThreadPool* pool = renderer_->get_thread_pool();
         if (pool != nullptr)
         {
-            // Render is in progress if thread pool is running and not idle
-            // Also check if tasks are executing, even if pool appears idle temporarily
-            return pool->is_running() && !pool->is_idle();
+            // Render is in progress if thread pool is not idle
+            return !pool->is_idle();
         }
     }
 
     return false;
 }
 
-template<typename FloatType>
-void ImGuiRenderer<FloatType>::on_pixels_updated(const unsigned char* pixels, int width, int height)
+void ImGuiRenderer::on_pixels_updated(const unsigned char* pixels, int width, int height)
 {
-    // Always update pixels_generation_ to the current render_generation_ when pixels are updated
-    // This ensures we track which generation the pixels belong to
-    pixels_generation_ = render_generation_;
-    
     pixels_ = pixels;
     width_ = width;
     height_ = height;
     texture_dirty_ = true;
 }
 
-template <typename FloatType>
-void ImGuiRenderer<FloatType>::apply_pending_settings_if_ready()
+void ImGuiRenderer::apply_pending_settings_if_ready()
 {
     // Only apply pending settings if we have them and render is not in progress
     if (!has_pending_settings_ || renderer_ == nullptr)
@@ -330,7 +220,6 @@ void ImGuiRenderer<FloatType>::apply_pending_settings_if_ready()
     has_pending_settings_ = false;
 
     // Validate and ensure min < max for both X and Y
-    constexpr FloatType eps = std::numeric_limits<FloatType>::epsilon() * static_cast<FloatType>(100.0);
     if (x_min >= x_max)
     {
         std::swap(x_min, x_max);
@@ -349,9 +238,9 @@ void ImGuiRenderer<FloatType>::apply_pending_settings_if_ready()
         FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
         calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
         // Clamp to max_zoom (which is FloatType, supports much higher precision than uint64_t)
-        if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
+        if (calculated_zoom > MandelbrotRenderer::max_zoom)
         {
-            calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+            calculated_zoom = MandelbrotRenderer::max_zoom;
         }
     }
 
@@ -361,17 +250,20 @@ void ImGuiRenderer<FloatType>::apply_pending_settings_if_ready()
     renderer_->set_zoom(calculated_zoom);
     renderer_->set_max_iterations(max_iter);
 
-    if (!double_buffering_enabled_)
-    {
-        clear_canvas();
-    }
-
     ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
     renderer_->regenerate(pool);
+    is_rendering_ = true;
+    
+    // Reset visual state since we're applying new settings
+    display_offset_x_ = 0.0f;
+    display_offset_y_ = 0.0f;
+    render_start_offset_x_ = 0.0f;
+    render_start_offset_y_ = 0.0f;
+    display_scale_ = 1.0f;
+    suppress_texture_updates_ = false;
 }
 
-template<typename FloatType>
-void ImGuiRenderer<FloatType>::draw()
+void ImGuiRenderer::draw()
 {
     // Draw Mandelbrot set on the main app background (not in a window)
     // This must be done before creating other windows so it's drawn behind them
@@ -395,10 +287,7 @@ void ImGuiRenderer<FloatType>::draw()
                 if (threading_enabled_)
                 {
                     ThreadPool* pool = renderer_->get_thread_pool();
-                    if (pool != nullptr && pool->is_running())
-                    {
-                        pool->reset();  // This waits for all tasks to complete
-                    }
+                    pool->pause();
                 }
 
                 // Invalidate any pending texture updates to prevent using old pixel data
@@ -437,9 +326,9 @@ void ImGuiRenderer<FloatType>::draw()
                         {
                             FloatType calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
                             // Clamp to max_zoom (which is FloatType)
-                            if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
+                            if (calculated_zoom > MandelbrotRenderer::max_zoom)
                             {
-                                calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+                                calculated_zoom = MandelbrotRenderer::max_zoom;
                             }
                             renderer_->set_zoom(calculated_zoom);
                         }
@@ -455,27 +344,43 @@ void ImGuiRenderer<FloatType>::draw()
 
                 // Resize the canvas only - complex plane bounds remain unchanged
                 render_generation_++;
-                if (!double_buffering_enabled_)
-                {
-                    clear_canvas();
-                }
                 ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                 renderer_->init(new_width, new_height, pool);
+                is_rendering_ = true;  // init() triggers a render
                 // Update applied settings after init (init will trigger first render)
-                // Note: This is done after init completes, so renderer has the correct values
                 if (renderer_ && first_window_size_set_)
                 {
                     applied_settings_ =
-                        ViewState<FloatType>(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+                        ViewState(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
                 }
+                // Reset visual state since dimensions changed
+                display_offset_x_ = 0.0f;
+                display_offset_y_ = 0.0f;
+                render_start_offset_x_ = 0.0f;
+                render_start_offset_y_ = 0.0f;
+                display_scale_ = 1.0f;
+                suppress_texture_updates_ = false;
             }
         }
     }
 
+    // Upload any pending pixels to back texture, then swap to front
+    // This prevents flickering by never modifying the displayed texture
+    // Skip updates during pan/zoom to keep showing old content at offset/scale
+    if (texture_dirty_ && !suppress_texture_updates_ && pixels_ != nullptr && 
+        update_callback_ != nullptr && renderer_ != nullptr && width_ > 0 && height_ > 0)
+    {
+        // Upload to back buffer
+        update_callback_(&texture_back_, pixels_, width_, height_);
+        // Swap back to front
+        std::swap(texture_front_, texture_back_);
+        texture_dirty_ = false;
+    }
+
     // Draw Mandelbrot set on the background and create input window BEFORE controls window
     // This ensures the input window is behind the controls window
-    ImTextureID display_texture = texture_front_;
-    if (display_texture != 0 && renderer_ && width_ > 0 && height_ > 0)
+    // Display texture_front_ at display_offset_ for buttery smooth dragging
+    if (texture_front_ != 0 && renderer_ && width_ > 0 && height_ > 0)
     {
         ImVec2 image_size(static_cast<float>(width_), static_cast<float>(height_));
 
@@ -483,10 +388,22 @@ void ImGuiRenderer<FloatType>::draw()
         if (image_size.x > 0.0f && image_size.y > 0.0f)
         {
             // Draw the image directly on the background using the background draw list
+            // Apply visual offset (for panning) and scale (for zooming) for immediate feedback
             ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
-            ImVec2 image_min(0.0f, 0.0f);
-            ImVec2 image_max(image_size.x, image_size.y);
-            draw_list->AddImage(display_texture, image_min, image_max);
+            
+            // Calculate scaled size
+            float scaled_width = image_size.x * display_scale_;
+            float scaled_height = image_size.y * display_scale_;
+            
+            // Scale centered on zoom_center_ (mouse position when zoom started)
+            // The point at zoom_center_ should stay fixed during scaling
+            // offset = zoom_center - zoom_center * scale = zoom_center * (1 - scale)
+            float scale_offset_x = zoom_center_x_ * (1.0f - display_scale_);
+            float scale_offset_y = zoom_center_y_ * (1.0f - display_scale_);
+            
+            ImVec2 image_min(scale_offset_x + display_offset_x_, scale_offset_y + display_offset_y_);
+            ImVec2 image_max(scale_offset_x + scaled_width + display_offset_x_, scale_offset_y + scaled_height + display_offset_y_);
+            draw_list->AddImage(texture_front_, image_min, image_max);
 
             // Create an invisible full-screen window to capture mouse input on the background
             // This window must be created BEFORE the controls window so it's behind it
@@ -566,34 +483,22 @@ void ImGuiRenderer<FloatType>::draw()
                 FloatType new_y_min = current_y_min + offset_y;
                 FloatType new_y_max = current_y_max + offset_y;
 
-                // Update bounds and regenerate
-                // When double-buffering, wait for current render to complete before starting new one
-                if (double_buffering_enabled_ && is_render_in_progress())
+                // Update bounds and regenerate (wait for current render to complete)
+                if (!is_render_in_progress() && !is_rendering_)
                 {
-                    // Defer starting new render until current one completes
-                    // Just update bounds for now, render will start next frame when current one is done
+                    render_generation_++;
                     renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                }
-                else
-                {
-                    // Double-check one more time right before we actually start the render
-                    // This prevents race conditions where a render might have started between checks
-                    if (double_buffering_enabled_ && is_render_in_progress())
-                    {
-                        // Render started between checks, just update bounds and defer
-                        renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                    }
-                    else
-                    {
-                        render_generation_++;
-                        renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                        if (!double_buffering_enabled_)
-                        {
-                            clear_canvas();
-                        }
-                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
-                        renderer_->regenerate(pool);
-                    }
+                    ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                    renderer_->regenerate(pool);
+                    is_rendering_ = true;
+                    
+                    // Reset visual state since we're centering on a new location
+                    display_offset_x_ = 0.0f;
+                    display_offset_y_ = 0.0f;
+                    render_start_offset_x_ = 0.0f;
+                    render_start_offset_y_ = 0.0f;
+                    display_scale_ = 1.0f;
+                    suppress_texture_updates_ = false;
                 }
 
                 // Reset dragging state to prevent interference
@@ -613,122 +518,94 @@ void ImGuiRenderer<FloatType>::draw()
                 float pixel_x = (mouse_x / viewport_size.x) * static_cast<float>(width_);
                 float pixel_y = (mouse_y / viewport_size.y) * static_cast<float>(height_);
 
-                // Handle dragging - simplified detection
+                // Handle dragging
                 if (is_active && ImGui::IsMouseDown(ImGuiMouseButton_Left))
                 {
+                    ImVec2 current_pos(mouse_x, mouse_y);
+                    
                     // Start dragging when mouse button is first pressed
                     if (!is_dragging_)
                     {
                         is_dragging_ = true;
-                        last_drag_pos_ = ImVec2(mouse_x, mouse_y);
+                        last_drag_pos_ = current_pos;
                     }
 
-                    // Only regenerate if mouse has actually moved (with small threshold to avoid float precision issues)
-                    const float move_threshold = 1.0f;
-                    ImVec2 current_pos(mouse_x, mouse_y);
-                    float move_distance = std::sqrt((current_pos.x - last_drag_pos_.x) * (current_pos.x - last_drag_pos_.x) +
-                                                    (current_pos.y - last_drag_pos_.y) * (current_pos.y - last_drag_pos_.y));
-
-                    // When double-buffering, only regenerate if current render is complete
-                    // Otherwise, wait for it to finish before starting new render
-                    if (move_distance >= move_threshold)
+                    // Calculate incremental delta from last frame
+                    ImVec2 frame_delta(current_pos.x - last_drag_pos_.x, current_pos.y - last_drag_pos_.y);
+                    
+                    // Update visual offset immediately for instant feedback
+                    display_offset_x_ += frame_delta.x;
+                    display_offset_y_ += frame_delta.y;
+                    
+                    // Remember position for next frame
+                    last_drag_pos_ = current_pos;
+                    
+                    // Calculate pending offset (how much we've dragged past what's being rendered)
+                    float pending_offset_x = display_offset_x_ - render_start_offset_x_;
+                    float pending_offset_y = display_offset_y_ - render_start_offset_y_;
+                    
+                    // Start a new render if we have significant offset beyond current render
+                    constexpr float start_threshold = 1.0f;
+                    constexpr float restart_threshold = 64.0f;
+                    float threshold = is_rendering_ ? restart_threshold : start_threshold;
+                    
+                    if (std::abs(pending_offset_x) >= threshold || std::abs(pending_offset_y) >= threshold)
                     {
-                        // Get current bounds and calculate incremental delta
-                        FloatType current_x_min = renderer_->get_x_min();
-                        FloatType current_x_max = renderer_->get_x_max();
-                        FloatType current_y_min = renderer_->get_y_min();
-                        FloatType current_y_max = renderer_->get_y_max();
-
-                        // Calculate incremental pixel delta from last position
-                        ImVec2 drag_delta(current_pos.x - last_drag_pos_.x, current_pos.y - last_drag_pos_.y);
-
-                        // Convert pixel delta to complex plane delta
-                        FloatType x_range = current_x_max - current_x_min;
-                        FloatType y_range = current_y_max - current_y_min;
-                        FloatType pixel_to_x = x_range / static_cast<FloatType>(width_);
-                        FloatType pixel_to_y = y_range / static_cast<FloatType>(height_);
-
-                        // Pan in opposite direction (drag right = view moves left, drag down = view moves down)
-                        FloatType delta_x = -static_cast<FloatType>(drag_delta.x) * pixel_to_x;
-                        FloatType delta_y = -static_cast<FloatType>(drag_delta.y) * pixel_to_y;
-
-                        FloatType new_x_min = current_x_min + delta_x;
-                        FloatType new_x_max = current_x_max + delta_x;
-                        FloatType new_y_min = current_y_min + delta_y;
-                        FloatType new_y_max = current_y_max + delta_y;
-
-                        // Calculate pixel offsets for optimized panning
-                        // Only use panning optimization when double buffering is enabled
-                        // Without double buffering, the canvas may not be reliable for pixel reuse
-                        int pan_dx = 0;
-                        int pan_dy = 0;
-                        if (double_buffering_enabled_)
-                        {
-                            // drag_delta is in screen pixels, and represents how much the mouse moved
-                            // Positive drag_delta.x means dragged right (view moves left, pixels shift right)
-                            // Positive drag_delta.y means dragged down (view moves up, pixels shift down)
-                            // Pixel shift direction matches drag direction to reuse existing pixels
-                            pan_dx = static_cast<int>(std::round(drag_delta.x));
-                            pan_dy = static_cast<int>(std::round(drag_delta.y));
-
-                            // Only use panning if the pan is not too large to reuse existing data
-                            if (std::abs(pan_dx) >= width_ || std::abs(pan_dy) >= height_)
-                            {
-                                pan_dx = 0;
-                                pan_dy = 0;
-                            }
-                        }
-
-                        // When double-buffering, only start new render if current render is complete
-                        // This ensures renders complete and display before starting new ones
-                        // Check right before calling regenerate() to avoid race conditions
-                        bool can_start_new_render = !double_buffering_enabled_ || !is_render_in_progress();
-                        if (can_start_new_render)
-                        {
-                            // Double-check one more time right before we actually start the render
-                            // This prevents race conditions where a render might have started between checks
-                            if (double_buffering_enabled_ && is_render_in_progress())
-                            {
-                                // Render started between checks, skip this frame
-                                // Will try again next frame when render completes
-                            }
-                            else
-                            {
-                                // Update bounds and regenerate
-                                render_generation_++;
-                                renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                                if (!double_buffering_enabled_)
-                                {
-                                    clear_canvas();
-                                }
-                                ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
-                                renderer_->regenerate(pool, pan_dx, pan_dy);
-
-                                // Remember this position so we don't regenerate again until mouse moves more
-                                last_drag_pos_ = current_pos;
-                            }
-                        }
-                        // else: render in progress, will try again next frame when render completes
+                        // Calculate new bounds based on PENDING offset (since last render start)
+                        // NOT total offset - current bounds already incorporate previous renders
+                        FloatType x_range = renderer_->get_x_max() - renderer_->get_x_min();
+                        FloatType y_range = renderer_->get_y_max() - renderer_->get_y_min();
+                        
+                        // Use texture dimensions (width_/height_) for conversion, NOT viewport_size
+                        // The texture is drawn at (width_, height_) size, so 1 pixel of visual offset
+                        // corresponds to (x_range / width_) complex units. Using viewport_size causes
+                        // drift when it differs from texture size (float truncation, resize timing).
+                        FloatType screen_to_x = x_range / static_cast<FloatType>(width_);
+                        FloatType screen_to_y = y_range / static_cast<FloatType>(height_);
+                        
+                        // Calculate pan in complex plane (opposite direction of screen drag)
+                        // Use PENDING offset, not total - bounds already shifted by previous renders
+                        FloatType pan_x = -static_cast<FloatType>(pending_offset_x) * screen_to_x;
+                        FloatType pan_y = -static_cast<FloatType>(pending_offset_y) * screen_to_y;
+                        
+                        FloatType new_x_min = renderer_->get_x_min() + pan_x;
+                        FloatType new_x_max = renderer_->get_x_max() + pan_x;
+                        FloatType new_y_min = renderer_->get_y_min() + pan_y;
+                        FloatType new_y_max = renderer_->get_y_max() + pan_y;
+                        
+                        // Snapshot current offset - will be subtracted when render completes
+                        render_start_offset_x_ = display_offset_x_;
+                        render_start_offset_y_ = display_offset_y_;
+                        
+                        // Suppress texture updates during pan - keep showing old content at offset
+                        suppress_texture_updates_ = true;
+                        
+                        // Increment generation to invalidate any stale in-progress render
+                        render_generation_++;
+                        
+                        // Start the render
+                        renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
+                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                        
+                        // Pan pixel-shift optimization disabled during active drag
+                        // Full regenerate is more reliable
+                        renderer_->regenerate(pool, 0, 0);
+                        is_rendering_ = true;
                     }
                 }
                 else
                 {
-                    // Stop dragging when button is released or item is no longer active
-                    is_dragging_ = false;
+                    // Stop dragging when button is released
+                    if (is_dragging_)
+                    {
+                        is_dragging_ = false;
+                    }
                 }
 
-                // Handle scroll wheel zoom
-                // When double-buffering, wait for current render to complete before starting new one
+                // Handle scroll wheel zoom (wait for current render to complete)
                 float current_wheel = io.MouseWheel;
-                if (std::abs(current_wheel) > 0.01f)
+                if (std::abs(current_wheel) > 0.01f && !is_render_in_progress() && !is_dragging_)
                 {
-                    // If double-buffering and render in progress, defer zoom until next frame
-                    if (double_buffering_enabled_ && is_render_in_progress())
-                    {
-                        // Defer zoom - will be processed next frame when render completes
-                    }
-                    else
-                    {
                         // Get current bounds
                         FloatType current_x_min = renderer_->get_x_min();
                         FloatType current_x_max = renderer_->get_x_max();
@@ -745,11 +622,25 @@ void ImGuiRenderer<FloatType>::draw()
                         FloatType mouse_complex_x = current_x_min + pixel_to_x * static_cast<FloatType>(pixel_x);
                         FloatType mouse_complex_y = current_y_min + pixel_to_y * static_cast<FloatType>(pixel_y);
 
-                        // Zoom factor (positive wheel = zoom in)
-                        FloatType zoom_factor = static_cast<FloatType>(1.0) + static_cast<FloatType>(current_wheel) * static_cast<FloatType>(zoom_step_);
+                        // Zoom factor using exponential for symmetry
+                        // zoom_in then zoom_out returns to original: base^1 * base^(-1) = 1
+                        FloatType zoom_base = static_cast<FloatType>(1.0) + static_cast<FloatType>(zoom_step_);
+                        FloatType zoom_factor = std::pow(zoom_base, static_cast<FloatType>(current_wheel));
 
-                        // Get max zoom from template constant (FloatType, not uint64_t)
-                        constexpr FloatType max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+                        // Clamp zoom_factor to reasonable bounds
+                        constexpr FloatType min_zoom_factor = static_cast<FloatType>(0.1);
+                        constexpr FloatType max_single_step = static_cast<FloatType>(10.0);
+                        if (zoom_factor < min_zoom_factor)
+                        {
+                            zoom_factor = min_zoom_factor;
+                        }
+                        else if (zoom_factor > max_single_step)
+                        {
+                            zoom_factor = max_single_step;
+                        }
+
+                        // Get max zoom from constant (FloatType, not uint64_t)
+                        constexpr FloatType max_zoom = MandelbrotRenderer::max_zoom;
                         constexpr FloatType min_range = static_cast<FloatType>(4.0) / max_zoom;
 
                         // Limit zoom_factor to prevent ranges from going below minimum
@@ -786,31 +677,55 @@ void ImGuiRenderer<FloatType>::draw()
                             new_zoom = max_zoom;
                         }
 
-                        // Double-check one more time right before we actually start the render
-                        // This prevents race conditions where a render might have started between checks
-                        if (double_buffering_enabled_ && is_render_in_progress())
+                        // Clamp zoom to minimum (prevent zooming out too far)
+                        constexpr FloatType min_zoom = static_cast<FloatType>(0.25);
+                        if (new_zoom < min_zoom)
                         {
-                            // Render started between checks, defer zoom until next frame
+                            // Recalculate bounds based on minimum zoom
+                            new_zoom = min_zoom;
+                            FloatType clamped_range = static_cast<FloatType>(4.0) / min_zoom;
+                            new_x_range = clamped_range;
+                            new_y_range = clamped_range;
+                            new_x_min = mouse_complex_x - mouse_x_ratio * new_x_range;
+                            new_x_max = new_x_min + new_x_range;
+                            new_y_min = mouse_complex_y - mouse_y_ratio * new_y_range;
+                            new_y_max = new_y_min + new_y_range;
                         }
-                        else
-                        {
-                            render_generation_++;
-                            renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                            renderer_->set_zoom(new_zoom);
-                            if (!double_buffering_enabled_)
-                            {
-                                clear_canvas();
-                            }
-                            ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
-                            renderer_->regenerate(pool);
-                        }
-                    }
+
+                        // Set display scale for immediate visual feedback
+                        // zoom_factor > 1 means zooming in (stretch texture)
+                        // zoom_factor < 1 means zooming out (shrink texture)
+                        display_scale_ = static_cast<float>(zoom_factor);
+                        
+                        // Set zoom center to mouse position (in screen pixels)
+                        // The point under the mouse should stay fixed during scaling
+                        zoom_center_x_ = pixel_x;
+                        zoom_center_y_ = pixel_y;
+                        
+                        // Suppress texture updates during zoom - keep showing old content scaled
+                        suppress_texture_updates_ = true;
+                        
+                        render_generation_++;
+                        renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
+                        renderer_->set_zoom(new_zoom);
+                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                        renderer_->regenerate(pool);
+                        is_rendering_ = true;
+                        
+                        // Reset drag offset since zoom changes the entire view
+                        display_offset_x_ = 0.0f;
+                        display_offset_y_ = 0.0f;
+                        render_start_offset_x_ = 0.0f;
+                        render_start_offset_y_ = 0.0f;
                 }
             }
             else
             {
                 // Reset dragging state if mouse leaves the image
-                is_dragging_ = false;
+                if (is_dragging_)
+                {
+                    is_dragging_ = false;
+                }
             }
         }
     }
@@ -847,7 +762,7 @@ void ImGuiRenderer<FloatType>::draw()
             if (applied_settings_.max_iterations == 0 && !is_render_in_progress())
             {
                 applied_settings_ =
-                    ViewState<FloatType>(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+                    ViewState(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
             }
 
             // Get current settings (from renderer if no pending, otherwise from pending)
@@ -868,7 +783,7 @@ void ImGuiRenderer<FloatType>::draw()
             }
 
             // Get max zoom for clamping
-            static const FloatType max_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+            static const FloatType max_zoom = MandelbrotRenderer::max_zoom;
             static const FloatType min_zoom = static_cast<FloatType>(0.1);
 
             // Read UI values and check if they differ from applied settings
@@ -880,21 +795,20 @@ void ImGuiRenderer<FloatType>::draw()
             // Epsilon is of FloatType
             constexpr FloatType eps = std::numeric_limits<FloatType>::epsilon() * static_cast<FloatType>(100.0);
 
-            // Format string based on FloatType precision
-            // Use higher precision for more significant digits
-            const char* format_str = std::is_same_v<FloatType, long double> ? "%.16Lf" : (std::is_same_v<FloatType, double> ? "%.13f" : "%.8f");
+            // Format string for long double precision
+            const char* format_str = "%.16Lf";
             FloatType step = static_cast<FloatType>(0.0);
 
             ImGui::TextUnformatted("Min:");
             ImGui::SameLine();
-            ImGuiInputHelper<FloatType>::input(",##min_x", &x_min, step, step, format_str);
+            detail::imgui_input_float(",##min_x", &x_min, step, step, format_str);
             if (x_min >= x_max)
             {
                 x_max = x_min + eps;
             }
 
             ImGui::SameLine();
-            ImGuiInputHelper<FloatType>::input(",##min_y", &y_min, step, step, format_str);
+            detail::imgui_input_float(",##min_y", &y_min, step, step, format_str);
             if (y_max <= y_min)
             {
                 y_max = y_min + eps;
@@ -903,14 +817,14 @@ void ImGuiRenderer<FloatType>::draw()
             ImGui::TextUnformatted("Max:");
             ImGui::SameLine();
 
-            ImGuiInputHelper<FloatType>::input(",##max_x", &x_max, step, step, format_str);
+            detail::imgui_input_float(",##max_x", &x_max, step, step, format_str);
             if (x_min >= x_max)
             {
                 x_min = x_max - eps;
             }
 
             ImGui::SameLine();
-            ImGuiInputHelper<FloatType>::input(",##max_y", &y_max, step, step, format_str);
+            detail::imgui_input_float(",##max_y", &y_max, step, step, format_str);
             if (y_min >= y_max)
             {
                 y_min = y_max - eps;
@@ -940,8 +854,6 @@ void ImGuiRenderer<FloatType>::draw()
             }
 
             ImGui::Checkbox("Threading", &threading_enabled_);
-            ImGui::SameLine();
-            ImGui::Checkbox("Double Buffering", &double_buffering_enabled_);
 
             // Compare current UI values with applied settings to detect changes (only if zoom wasn't just edited)
             if (!zoom_edited)
@@ -956,17 +868,9 @@ void ImGuiRenderer<FloatType>::draw()
             // Update pending settings if changed
             if (settings_changed)
             {
-                pending_settings_ = ViewState<FloatType>(x_min, x_max, y_min, y_max, max_iter);
+                pending_settings_ = ViewState(x_min, x_max, y_min, y_max, max_iter);
                 has_pending_settings_ = true;
             }
-
-            // ImGui::SameLine();
-            // ImGui::PushItemWidth(80.f);
-            // if (ImGui::SliderInt("Recurse", &recurse_size_limit_, 4, 64, "%d"))
-            // {
-            //     renderer_->set_recurse_size_limit(recurse_size_limit_);
-            // }
-            // ImGui::PopItemWidth();
 
             ImGui::Text("Render Generation: %d", render_generation_);
 
@@ -997,7 +901,7 @@ void ImGuiRenderer<FloatType>::draw()
             if (ImGui::Button("Save Current View"))
             {
                 // Save current view state
-                ViewState<FloatType> current_state(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+                ViewState current_state(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
                 saved_views_[new_view_name] = current_state;
                 new_view_name_buffer_[0] = '\0';  // Clear the buffer
                 // Save immediately on manual edit
@@ -1012,7 +916,7 @@ void ImGuiRenderer<FloatType>::draw()
             // Table of saved views
             ImGui::Spacing();
 
-            ImGui::BeginDisabled(double_buffering_enabled_ && is_render_in_progress());
+            ImGui::BeginDisabled(is_render_in_progress());
             ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
                                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Hideable | ImGuiTableFlags_NoSavedSettings;
             if (ImGui::BeginTable("SavedViews", 5, table_flags, ImVec2(0, -FLT_MIN)))
@@ -1033,18 +937,22 @@ void ImGuiRenderer<FloatType>::draw()
                     {
                         // Apply reset state
                         render_generation_++;
-                        if (!double_buffering_enabled_)
-                        {
-                            clear_canvas();
-                        }
                         renderer_->set_bounds(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_);
                         renderer_->set_zoom(initial_zoom_);
                         renderer_->set_max_iterations(initial_max_iterations_);
                         ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                         renderer_->regenerate(pool);
+                        is_rendering_ = true;
                         // Update applied settings and clear pending settings
-                        applied_settings_ = ViewState<FloatType>(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_, initial_max_iterations_);
+                        applied_settings_ = ViewState(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_, initial_max_iterations_);
                         has_pending_settings_ = false;
+                        // Reset visual state
+                        display_offset_x_ = 0.0f;
+                        display_offset_y_ = 0.0f;
+                        render_start_offset_x_ = 0.0f;
+                        render_start_offset_y_ = 0.0f;
+                        display_scale_ = 1.0f;
+                        suppress_texture_updates_ = false;
                     }
                 }
 
@@ -1073,7 +981,7 @@ void ImGuiRenderer<FloatType>::draw()
                     bool delete_clicked = false;
 
                     const std::string& name = it->first;
-                    const ViewState<FloatType>& state = it->second;
+                    const ViewState& state = it->second;
 
                     if (ImGui::TableNextColumn())  // Actions
                     {
@@ -1136,119 +1044,44 @@ void ImGuiRenderer<FloatType>::draw()
     }
     ImGui::End();
 
-    // Update texture if needed using platform-specific callback
-    // Only update if we have valid pixels and dimensions match renderer
-    if (texture_dirty_ && pixels_ != nullptr && update_callback_ != nullptr && renderer_ != nullptr && width_ > 0 && height_ > 0 && width_ == renderer_->get_width() &&
-        height_ == renderer_->get_height())
+    // Check if render completed
+    if (is_rendering_ && !is_render_in_progress() && renderer_ != nullptr)
     {
-        // Store the pixels pointer we're about to update to detect interruptions
-        const unsigned char* pixels_to_update = pixels_;
-
-        // Determine target texture
-        ImTextureID* target_texture = nullptr;
-        if (double_buffering_enabled_)
+        // Render completed - upload to back buffer, then swap to front
+        // This prevents flickering by never modifying the displayed texture
+        const unsigned char* final_pixels = renderer_->get_pixels();
+        int final_width = renderer_->get_width();
+        int final_height = renderer_->get_height();
+        
+        if (final_pixels != nullptr && update_callback_ != nullptr && final_width > 0 && final_height > 0)
         {
-            // When double buffering is enabled:
-            // - If front buffer doesn't exist yet, update it (first render)
-            // - Otherwise, update the back buffer (subsequent renders)
-            if (texture_front_ == 0)
-            {
-                target_texture = &texture_front_;
-            }
-            else
-            {
-                target_texture = &texture_back_;
-            }
+            // Upload to back buffer
+            update_callback_(&texture_back_, final_pixels, final_width, final_height);
+            // Swap back to front - now front has new content
+            std::swap(texture_front_, texture_back_);
         }
-        else
-        {
-            // Single buffering - always update front buffer
-            target_texture = &texture_front_;
-        }
-
-        pixels_being_updated_ = pixels_to_update;
-        update_callback_(target_texture, pixels_to_update, width_, height_);
-
-        // Only mark as not dirty if the update wasn't interrupted
-        // (i.e., if pixels_ hasn't changed to a new render)
-        if (pixels_ == pixels_to_update)
-        {
-            texture_dirty_ = false;
-        }
-        // else: pixels_ changed during update, meaning a new render started
-        // Keep texture_dirty_ true so we update again next frame with the new pixels
-
-        pixels_being_updated_ = nullptr;
+        texture_dirty_ = false;
+        
+        // Subtract the offset we rendered for from the current offset
+        // This preserves any additional drag that happened during the render
+        display_offset_x_ -= render_start_offset_x_;
+        display_offset_y_ -= render_start_offset_y_;
+        render_start_offset_x_ = 0.0f;
+        render_start_offset_y_ = 0.0f;
+        
+        // Reset scale and re-enable texture updates
+        display_scale_ = 1.0f;
+        suppress_texture_updates_ = false;
+        is_rendering_ = false;
     }
 
-    // Check if we can swap buffers (only when double-buffering is enabled)
-    // Swapping should only happen after ALL updates for a render are complete
-    // Allow completed renders to swap even if a newer render has been requested
-    if (double_buffering_enabled_ && pixels_ != nullptr)
-    {
-        // Check if thread pool tasks have all completed (pool is running and idle)
-        // This ensures tasks completed naturally, not because reset() was called
-        bool thread_pool_complete = false;
-        if (renderer_ != nullptr)
-        {
-            if (threading_enabled_)
-            {
-                ThreadPool* pool = renderer_->get_thread_pool();
-                if (pool != nullptr)
-                {
-                    // Tasks are complete if pool is running (not stopped) AND idle (all tasks done)
-                    thread_pool_complete = pool->is_running() && pool->is_idle();
-                }
-                else
-                {
-                    thread_pool_complete = !texture_dirty_;
-                }
-            }
-            else
-            {
-                // No thread pool means synchronous rendering - all updates complete when texture_dirty_ is false
-                // For synchronous rendering, if texture is not dirty, all updates are done
-                thread_pool_complete = !texture_dirty_;
-            }
-        }
-
-        // Check if the current pixels represent a completed render that hasn't been swapped yet
-        // Allow swapping for any completed render generation, not just the latest one
-        // This ensures renders complete and swap even if a new render was requested
-        bool can_swap_for_generation = false;
-        if (thread_pool_complete && pixels_generation_ != UINT_MAX && pixels_generation_ != swapped_generation_)
-        {
-            // This generation completed and hasn't been swapped yet - allow it to swap
-            can_swap_for_generation = true;
-        }
-
-        // For double buffering to swap, we need:
-        // 1. Thread pool tasks completed naturally (if using thread pool) OR texture not dirty (if synchronous)
-        // 2. Back buffer exists (we've updated it)
-        // 3. The pixels represent a completed generation that hasn't been swapped yet
-
-        // Normal swap: Both buffers exist and all tasks are complete
-        if (can_swap_for_generation && texture_back_ != 0 && texture_front_ != 0)
-        {
-            swap_buffers();
-            swapped_generation_ = pixels_generation_;
-        }
-        // Initial swap: First render with double buffering - initialize front buffer
-        else if (can_swap_for_generation && texture_back_ != 0 && texture_front_ == 0)
-        {
-            swap_buffers();
-            swapped_generation_ = pixels_generation_;
-        }
-    }
-
-    // Try to apply pending settings after checking buffer swap (another opportunity if render just completed)
+    // Try to apply pending settings after checking render completion
     apply_pending_settings_if_ready();
 
     // Views are saved immediately on manual edits, not here
 }
 
-template <typename FloatType>
-void ImGuiRenderer<FloatType>::apply_view_state(const ViewState<FloatType>& state)
+void ImGuiRenderer::apply_view_state(const ViewState& state)
 {
     if (renderer_ == nullptr)
     {
@@ -1256,30 +1089,15 @@ void ImGuiRenderer<FloatType>::apply_view_state(const ViewState<FloatType>& stat
     }
 
     // Set max_iterations immediately so it's applied even if render is deferred
-    // This ensures the UI reflects the correct value right away
     renderer_->set_max_iterations(state.max_iterations);
 
-    // When double-buffering, wait for current render to complete before starting new one
-    if (double_buffering_enabled_ && is_render_in_progress())
+    // Wait for current render to complete before starting new one
+    if (is_render_in_progress())
     {
-        // Defer bounds/zoom update until current render completes
-        // Max iterations already set above
-        return;
-    }
-
-    // Double-check one more time right before we actually start the render
-    if (double_buffering_enabled_ && is_render_in_progress())
-    {
-        // Render started between checks, defer bounds/zoom update until next frame
-        // Max iterations already set above
         return;
     }
 
     render_generation_++;
-    if (!double_buffering_enabled_)
-    {
-        clear_canvas();
-    }
     renderer_->set_bounds(state.x_min, state.x_max, state.y_min, state.y_max);
     // Calculate zoom from bounds
     FloatType x_range = state.x_max - state.x_min;
@@ -1289,21 +1107,29 @@ void ImGuiRenderer<FloatType>::apply_view_state(const ViewState<FloatType>& stat
     {
         FloatType calculated_zoom = static_cast<FloatType>(4.0) / avg_range;
         // Clamp to max_zoom (which is FloatType)
-        if (calculated_zoom > MandelbrotRenderer<FloatType>::max_zoom)
+        if (calculated_zoom > MandelbrotRenderer::max_zoom)
         {
-            calculated_zoom = MandelbrotRenderer<FloatType>::max_zoom;
+            calculated_zoom = MandelbrotRenderer::max_zoom;
         }
         renderer_->set_zoom(calculated_zoom);
     }
     ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
     renderer_->regenerate(pool);
+    is_rendering_ = true;
     // Update applied settings and clear pending settings (view state takes precedence)
     applied_settings_ = state;
     has_pending_settings_ = false;
+    
+    // Reset visual state
+    display_offset_x_ = 0.0f;
+    display_offset_y_ = 0.0f;
+    render_start_offset_x_ = 0.0f;
+    render_start_offset_y_ = 0.0f;
+    display_scale_ = 1.0f;
+    suppress_texture_updates_ = false;
 }
 
-template <typename FloatType>
-void ImGuiRenderer<FloatType>::save_view_state(const std::string& name)
+void ImGuiRenderer::save_view_state(const std::string& name)
 {
     if (renderer_ == nullptr)
     {
@@ -1315,15 +1141,14 @@ void ImGuiRenderer<FloatType>::save_view_state(const std::string& name)
     if (it != saved_views_.end())
     {
         // Update the existing view with current renderer state
-        ViewState<FloatType> current_state(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+        ViewState current_state(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
         it->second = current_state;
         // Save immediately on manual edit
         save_views_to_file(false);  // Don't save current view (only named views)
     }
 }
 
-template <typename FloatType>
-std::string ImGuiRenderer<FloatType>::get_config_file_path() const
+std::string ImGuiRenderer::get_config_file_path() const
 {
     const char* home = std::getenv("HOME");
     if (home != nullptr)
@@ -1334,8 +1159,7 @@ std::string ImGuiRenderer<FloatType>::get_config_file_path() const
     return ".mandel";
 }
 
-template <typename FloatType>
-void ImGuiRenderer<FloatType>::save_views_to_file(bool include_current_view)
+void ImGuiRenderer::save_views_to_file(bool include_current_view)
 {
     try
     {
@@ -1347,10 +1171,10 @@ void ImGuiRenderer<FloatType>::save_views_to_file(bool include_current_view)
         {
             nlohmann::json view_obj;
             view_obj["name"] = name;
-            view_obj["x_min"] = JsonFloatStorage<FloatType>::to_json(state.x_min);
-            view_obj["x_max"] = JsonFloatStorage<FloatType>::to_json(state.x_max);
-            view_obj["y_min"] = JsonFloatStorage<FloatType>::to_json(state.y_min);
-            view_obj["y_max"] = JsonFloatStorage<FloatType>::to_json(state.y_max);
+            view_obj["x_min"] = detail::float_to_json(state.x_min);
+            view_obj["x_max"] = detail::float_to_json(state.x_max);
+            view_obj["y_min"] = detail::float_to_json(state.y_min);
+            view_obj["y_max"] = detail::float_to_json(state.y_max);
             view_obj["max_iterations"] = state.max_iterations;
             json_data["views"].push_back(view_obj);
         }
@@ -1359,10 +1183,10 @@ void ImGuiRenderer<FloatType>::save_views_to_file(bool include_current_view)
         if (include_current_view && renderer_ != nullptr)
         {
             nlohmann::json current_view;
-            current_view["x_min"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_x_min());
-            current_view["x_max"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_x_max());
-            current_view["y_min"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_y_min());
-            current_view["y_max"] = JsonFloatStorage<FloatType>::to_json(renderer_->get_y_max());
+            current_view["x_min"] = detail::float_to_json(renderer_->get_x_min());
+            current_view["x_max"] = detail::float_to_json(renderer_->get_x_max());
+            current_view["y_min"] = detail::float_to_json(renderer_->get_y_min());
+            current_view["y_max"] = detail::float_to_json(renderer_->get_y_max());
             current_view["max_iterations"] = renderer_->get_max_iterations();
             json_data["current_view"] = current_view;
         }
@@ -1380,8 +1204,7 @@ void ImGuiRenderer<FloatType>::save_views_to_file(bool include_current_view)
     }
 }
 
-template <typename FloatType>
-void ImGuiRenderer<FloatType>::load_views_from_file()
+void ImGuiRenderer::load_views_from_file()
 {
     try
     {
@@ -1405,12 +1228,12 @@ void ImGuiRenderer<FloatType>::load_views_from_file()
                     view_obj.contains("max_iterations"))
                 {
                     std::string name = view_obj["name"];
-                    FloatType x_min = JsonFloatStorage<FloatType>::from_json(view_obj["x_min"]);
-                    FloatType x_max = JsonFloatStorage<FloatType>::from_json(view_obj["x_max"]);
-                    FloatType y_min = JsonFloatStorage<FloatType>::from_json(view_obj["y_min"]);
-                    FloatType y_max = JsonFloatStorage<FloatType>::from_json(view_obj["y_max"]);
+                    FloatType x_min = detail::float_from_json(view_obj["x_min"]);
+                    FloatType x_max = detail::float_from_json(view_obj["x_max"]);
+                    FloatType y_min = detail::float_from_json(view_obj["y_min"]);
+                    FloatType y_max = detail::float_from_json(view_obj["y_max"]);
                     int max_iter = view_obj["max_iterations"];
-                    saved_views_[name] = ViewState<FloatType>(x_min, x_max, y_min, y_max, max_iter);
+                    saved_views_[name] = ViewState(x_min, x_max, y_min, y_max, max_iter);
                 }
             }
         }
@@ -1422,14 +1245,14 @@ void ImGuiRenderer<FloatType>::load_views_from_file()
             if (current_view.contains("x_min") && current_view.contains("x_max") && current_view.contains("y_min") && current_view.contains("y_max") &&
                 current_view.contains("max_iterations"))
             {
-                FloatType x_min = JsonFloatStorage<FloatType>::from_json(current_view["x_min"]);
-                FloatType x_max = JsonFloatStorage<FloatType>::from_json(current_view["x_max"]);
-                FloatType y_min = JsonFloatStorage<FloatType>::from_json(current_view["y_min"]);
-                FloatType y_max = JsonFloatStorage<FloatType>::from_json(current_view["y_max"]);
+                FloatType x_min = detail::float_from_json(current_view["x_min"]);
+                FloatType x_max = detail::float_from_json(current_view["x_max"]);
+                FloatType y_min = detail::float_from_json(current_view["y_min"]);
+                FloatType y_max = detail::float_from_json(current_view["y_max"]);
                 int max_iter = current_view["max_iterations"];
 
                 // Store the loaded current view to apply after initialization
-                loaded_current_view_ = ViewState<FloatType>(x_min, x_max, y_min, y_max, max_iter);
+                loaded_current_view_ = ViewState(x_min, x_max, y_min, y_max, max_iter);
                 has_loaded_current_view_ = true;
             }
         }
@@ -1443,5 +1266,3 @@ void ImGuiRenderer<FloatType>::load_views_from_file()
 }
 
 }  // namespace mandel
-
-#endif // MANDEL_RENDER_INL

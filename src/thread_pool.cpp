@@ -1,13 +1,9 @@
 #include "thread_pool.hpp"
-#include <mutex>
-#include <condition_variable>
+
 #include <functional>
+#include <mutex>
 
-
-ThreadPool::ThreadPool(size_t num_threads) : _stop(false), _destroying(false), _tasks_executing(0), _num_threads(num_threads)
-{
-    create_threads();
-}
+ThreadPool::ThreadPool(size_t num_threads) : _pause(false), _terminate(false), _tasks_executing(0), _num_threads(num_threads) { create_threads(); }
 
 void ThreadPool::create_threads()
 {
@@ -19,36 +15,28 @@ void ThreadPool::create_threads()
                 std::function<void()> task;
                 {
                     std::unique_lock<std::mutex> lock(_mutex);
-                    // Wait until not stopped and there are tasks, or we're being destroyed
-                    _condition.wait(lock, [this] { 
-                        return _destroying.load() || (!_stop.load() && !_tasks.empty());
+                    // Wait until: terminated, or (not paused and have tasks)
+                    _cv.wait(lock, [this] {
+                        return _terminate.load() || (!_pause.load() && !_tasks.empty());
                     });
-                    
-                    // Exit if being destroyed
-                    if (_destroying.load())
+
+                    if (_terminate.load())
                     {
                         return;
                     }
-                    
-                    // If stopped, continue waiting (don't process tasks)
-                    if (_stop.load())
+
+                    // Double-check we have tasks (might have been woken for pause/resume)
+                    if (_tasks.empty() || _pause.load())
                     {
                         continue;
                     }
-                    
-                    _tasks_executing++;
+
                     task = std::move(_tasks.front());
                     _tasks.pop();
+                    _tasks_executing.fetch_add(1);
                 }
                 task();
-                {
-                    std::unique_lock<std::mutex> lock(_mutex);
-                    _tasks_executing--;
-                    if (_tasks_executing.load() == 0)
-                    {
-                        _stopped_condition.notify_all();
-                    }
-                }
+                _tasks_executing.fetch_sub(1);
             }
         });
     }
@@ -58,11 +46,10 @@ ThreadPool::~ThreadPool()
 {
     {
         std::unique_lock<std::mutex> lock(_mutex);
-        _stop.store(true);
-        _destroying.store(true);
+        _terminate.store(true);
     }
-    _condition.notify_all();
-    
+    _cv.notify_all();
+
     for (auto& thread : _threads)
     {
         thread.join();
@@ -73,48 +60,51 @@ bool ThreadPool::add_task(std::function<void()>&& task)
 {
     {
         std::unique_lock<std::mutex> lock(_mutex);
-        if (_stop.load())
+        if (_terminate.load() || _pause.load())
         {
-            return false;  // Don't add tasks after shutdown
+            return false;  // Don't add tasks when paused or terminated
         }
         _tasks.push(task);
     }
-    _condition.notify_one();
+    _cv.notify_one();
     return true;
 }
 
 void ThreadPool::reset()
 {
-    // Set stop flag - threads will stop taking new tasks from queue
+    pause();
     {
         std::unique_lock<std::mutex> lock(_mutex);
-        _stop.store(true);
-    }
-    
-    // Wait for all currently executing tasks to complete (threads naturally finish)
-    {
-        std::unique_lock<std::mutex> lock(_mutex);
-        _stopped_condition.wait(lock, [this] { return _tasks_executing.load() == 0; });
-        
-        // Now safe to clear the queue - no tasks executing and threads won't take new ones
         while (!_tasks.empty())
         {
             _tasks.pop();
         }
     }
+    resume();
 }
 
-void ThreadPool::start()
+void ThreadPool::pause()
 {
+    // Wait for all queued and executing tasks to complete BEFORE setting pause flag
+    // This prevents the race where tasks are stuck in queue because workers see _pause=true
+    while (true)
     {
-        std::unique_lock<std::mutex> lock(_mutex);
-        if (!_stop.load())
         {
-            return;  // Already started
+            std::unique_lock<std::mutex> lock(_mutex);
+            if (_tasks.empty() && _tasks_executing.load() == 0)
+            {
+                _pause.store(true);
+                break;
+            }
         }
-        _stop.store(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    _condition.notify_all();  // Wake threads to start processing
+}
+
+void ThreadPool::resume()
+{
+    _pause.store(false);
+    _cv.notify_all();  // Wake up workers to check for tasks
 }
 
 bool ThreadPool::is_idle() const
@@ -123,8 +113,4 @@ bool ThreadPool::is_idle() const
     return _tasks.empty() && _tasks_executing.load() == 0;
 }
 
-bool ThreadPool::is_running() const
-{
-    std::unique_lock<std::mutex> lock(_mutex);
-    return !_stop.load() && !_destroying.load();
-}
+bool ThreadPool::is_paused() const { return _pause.load(); }

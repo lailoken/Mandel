@@ -92,11 +92,11 @@ int main(int /* argc */, char* /* argv */[])
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     // Create Mandelbrot renderer with long double precision
-    mandel::MandelbrotRenderer<long double> mandelbrot(800, 800);
+    mandel::MandelbrotRenderer mandelbrot(800, 800);
     
     // Create and set up ImGui renderer (platform-agnostic, uses ImGui canvas/rendering)
     // Platform-specific texture operations are handled via callbacks
-    mandel::ImGuiRenderer<long double> renderer(&mandelbrot, update_texture_opengl, delete_texture_opengl);
+    mandel::ImGuiRenderer renderer(&mandelbrot, update_texture_opengl, delete_texture_opengl);
     mandelbrot.set_render_callback(&renderer);
 
     // Main loop

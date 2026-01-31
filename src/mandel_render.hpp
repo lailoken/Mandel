@@ -11,11 +11,9 @@
 namespace mandel
 {
 // Forward declaration
-template<typename FloatType>
 class MandelbrotRenderer;
 
 // Structure to store view state (bounds and iteration count)
-template <typename FloatType>
 struct ViewState
 {
     FloatType x_min;
@@ -37,11 +35,10 @@ typedef void (*TextureDeleteCallback)(ImTextureID texture_id);
 
 // Pure ImGui-based renderer implementation (no platform-specific code)
 // Uses ImGui's Image widget and canvas API exclusively
-template<typename FloatType>
 class ImGuiRenderer : public RenderCallback
 {
 public:
-    ImGuiRenderer(MandelbrotRenderer<FloatType>* renderer, 
+    ImGuiRenderer(MandelbrotRenderer* renderer, 
                   TextureUpdateCallback update_callback = nullptr,
                   TextureDeleteCallback delete_callback = nullptr);
     ~ImGuiRenderer();
@@ -51,10 +48,8 @@ public:
     void draw();  // Draw ImGui window using pure ImGui APIs
     
 private:
-    void swap_buffers();
-    void clear_canvas();  // Clear canvas before rendering when double buffering is disabled
     bool is_render_in_progress() const;  // Check if a render is currently in progress
-    void apply_view_state(const ViewState<FloatType>& state);   // Apply a view state to the renderer
+    void apply_view_state(const ViewState& state);   // Apply a view state to the renderer
     void save_view_state(const std::string& name);              // Update a saved view with current renderer state
     void save_views_to_file(bool include_current_view = true);  // Save saved views to JSON file (include_current_view = true saves current view too)
     void load_views_from_file();                                // Load saved views from JSON file
@@ -62,24 +57,41 @@ private:
 
     constexpr static FloatType zoom_step_ = static_cast<FloatType>(0.5);
 
-    MandelbrotRenderer<FloatType>* renderer_;
-    ImTextureID texture_front_;  // Currently displayed texture (front buffer)
-    ImTextureID texture_back_;   // Texture being updated (back buffer)
+    MandelbrotRenderer* renderer_;
+    ImTextureID texture_front_;  // Currently displayed texture
+    ImTextureID texture_back_;   // Receives new uploads, then swapped to front
     int width_;
     int height_;
     const unsigned char* pixels_;
-    const unsigned char* pixels_being_updated_;  // Track which pixels we're currently updating
     bool texture_dirty_;
-    bool double_buffering_enabled_;
-    unsigned int render_generation_;  // Increments each time a new render starts
-    unsigned int pixels_generation_;  // Generation of the current pixels_
-    unsigned int swapped_generation_;  // Last generation we swapped buffers for
+    unsigned int render_generation_;  // Counter for debugging
     TextureUpdateCallback update_callback_;
     TextureDeleteCallback delete_callback_;
     
     // Interactive view control
     bool is_dragging_;
-    ImVec2 last_drag_pos_;  // Last mouse position we regenerated for
+    ImVec2 last_drag_pos_;  // Last mouse position during drag
+    
+    // Visual offset for panning - accumulated during drag for immediate feedback
+    float display_offset_x_;
+    float display_offset_y_;
+    
+    // Offset snapshot - the offset when we started the current render
+    // Used to calculate effective display offset and adjust after render
+    float render_start_offset_x_;
+    float render_start_offset_y_;
+    
+    // Display scale for zooming - stretch/shrink texture for immediate feedback
+    float display_scale_;
+    
+    // Zoom center (in screen pixels) - where to anchor the scale transformation
+    float zoom_center_x_;
+    float zoom_center_y_;
+    
+    // When true, don't update display texture (keep showing old content during render)
+    bool suppress_texture_updates_;
+    
+    bool is_rendering_;  // True if a render is in progress
 
     // Initial view state (for reset) - stored when renderer is first initialized
     bool initial_bounds_set_;
@@ -96,28 +108,22 @@ private:
     // Track threading state (controlled by UI checkbox)
     bool threading_enabled_;
 
-    // Recurse size limit
-    int recurse_size_limit_;
-
     // Track controls window transparency state
     bool controls_window_should_be_transparent_;
 
     // Saved views management
-    std::map<std::string, ViewState<FloatType>> saved_views_;
+    std::map<std::string, ViewState> saved_views_;
     char new_view_name_buffer_[256];            // Buffer for new view name input
     bool views_need_save_;                      // Flag to track if views need to be saved
-    ViewState<FloatType> loaded_current_view_;  // Current view loaded from file
+    ViewState loaded_current_view_;  // Current view loaded from file
     bool has_loaded_current_view_;              // Flag to track if we've loaded a current view
 
     // Pending settings management (for when render is in progress)
-    ViewState<FloatType> applied_settings_;  // Last applied settings (for comparison)
-    ViewState<FloatType> pending_settings_;  // Pending settings waiting to be applied
+    ViewState applied_settings_;  // Last applied settings (for comparison)
+    ViewState pending_settings_;  // Pending settings waiting to be applied
     bool has_pending_settings_;              // Flag indicating if there are pending settings
 
     void apply_pending_settings_if_ready();  // Check if render is done and apply pending settings
 };
 
 }  // namespace mandel
-
-// Include template implementation
-#include "mandel_render.inl"

@@ -10,8 +10,8 @@ int main()
     const int width = 800;
     const int height = 600;
     
-    // Create Mandelbrot renderer with double precision
-    mandel::MandelbrotRenderer<double> renderer(width, height);
+    // Create Mandelbrot renderer with long double precision
+    mandel::MandelbrotRenderer renderer(width, height);
     
     // Generate synchronously (no threading)
     renderer.regenerate(nullptr);
