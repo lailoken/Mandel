@@ -4,43 +4,15 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <limits>
-#include <sstream>
 #include <string>
+#include "config.hpp"
 #include "mandel.hpp"
 #include "thread_pool.hpp"
 
 namespace mandel
 {
-
-// JSON float storage helpers for long double
-namespace detail
-{
-    std::string float_to_json(FloatType value)
-    {
-        std::ostringstream oss;
-        oss.imbue(std::locale::classic());
-        oss.precision(21);  // Use maximum precision for long double (19-21 significant digits)
-        oss << value;
-        return oss.str();
-    }
-
-    FloatType float_from_json(const nlohmann::json& j)
-    {
-        if (j.is_string())
-        {
-            return std::strtold(j.get<std::string>().c_str(), nullptr);
-        }
-        else
-        {
-            // Old format: stored as number (backward compatibility)
-            return static_cast<FloatType>(j.get<double>());
-        }
-    }
-}
 
 // ImGui input helper for long double (convert to/from double since ImGui doesn't support long double)
 namespace detail
@@ -141,13 +113,20 @@ ImGuiRenderer::ImGuiRenderer(MandelbrotRenderer* renderer, TextureUpdateCallback
     applied_settings_ = ViewState();
     pending_settings_ = ViewState();
     // Load saved views from file on construction
-    load_views_from_file();
+    LoadedViews loaded = load_views_from_file();
+    saved_views_ = loaded.saved_views;
+    if (loaded.has_current_view)
+    {
+        loaded_current_view_ = loaded.current_view;
+        has_loaded_current_view_ = true;
+    }
 }
 
 ImGuiRenderer::~ImGuiRenderer()
 {
-    // Save current view and all views before destroying (include_current_view = true)
-    save_views_to_file(true);
+    // Save current view and all views before destroying
+    ViewState current_viewport = get_viewport_bounds();
+    save_views_to_file(saved_views_, &current_viewport);
 
     if (delete_callback_ != nullptr)
     {
@@ -980,7 +959,7 @@ void ImGuiRenderer::draw()
                 saved_views_[new_view_name] = viewport;
                 new_view_name_buffer_[0] = '\0';  // Clear the buffer
                 // Save immediately on manual edit
-                save_views_to_file(false);  // Don't save current view (only named views)
+                save_views_to_file(saved_views_);  // Don't save current view (only named views)
             }
             if (!can_save)
             {
@@ -1107,7 +1086,7 @@ void ImGuiRenderer::draw()
                     {
                         it = saved_views_.erase(it);
                         // Save immediately on manual edit
-                        save_views_to_file(false);  // Don't save current view (only named views)
+                        save_views_to_file(saved_views_);  // Don't save current view (only named views)
                     }
                     else
                     {
@@ -1233,67 +1212,10 @@ void ImGuiRenderer::save_view_state(const std::string& name)
         ViewState viewport = get_viewport_bounds();
         it->second = viewport;
         // Save immediately on manual edit
-        save_views_to_file(false);  // Don't save current view (only named views)
+        save_views_to_file(saved_views_);  // Don't save current view (only named views)
     }
 }
 
-std::string ImGuiRenderer::get_config_file_path() const
-{
-    const char* home = std::getenv("HOME");
-    if (home != nullptr)
-    {
-        return std::string(home) + "/.mandel";
-    }
-    // Fallback to current directory if HOME is not set
-    return ".mandel";
-}
-
-void ImGuiRenderer::save_views_to_file(bool include_current_view)
-{
-    try
-    {
-        std::string config_path = get_config_file_path();
-        nlohmann::json json_data;
-        json_data["views"] = nlohmann::json::array();
-
-        for (const auto& [name, state] : saved_views_)
-        {
-            nlohmann::json view_obj;
-            view_obj["name"] = name;
-            view_obj["x_min"] = detail::float_to_json(state.x_min);
-            view_obj["x_max"] = detail::float_to_json(state.x_max);
-            view_obj["y_min"] = detail::float_to_json(state.y_min);
-            view_obj["y_max"] = detail::float_to_json(state.y_max);
-            view_obj["max_iterations"] = state.max_iterations;
-            json_data["views"].push_back(view_obj);
-        }
-
-        // Save current view state only if requested (on exit)
-        // Save viewport bounds (what user sees), not buffer bounds
-        if (include_current_view && renderer_ != nullptr)
-        {
-            ViewState viewport = get_viewport_bounds();
-            nlohmann::json current_view;
-            current_view["x_min"] = detail::float_to_json(viewport.x_min);
-            current_view["x_max"] = detail::float_to_json(viewport.x_max);
-            current_view["y_min"] = detail::float_to_json(viewport.y_min);
-            current_view["y_max"] = detail::float_to_json(viewport.y_max);
-            current_view["max_iterations"] = viewport.max_iterations;
-            json_data["current_view"] = current_view;
-        }
-
-        std::ofstream file(config_path);
-        if (file.is_open())
-        {
-            file << json_data.dump(2);  // Pretty print with 2-space indentation
-            file.close();
-        }
-    }
-    catch (const std::exception& e)
-    {
-        // Silently fail - user can still use views in this session
-    }
-}
 
 ViewState ImGuiRenderer::get_viewport_bounds() const
 {
@@ -1341,67 +1263,6 @@ void ImGuiRenderer::extend_bounds_for_overscan(FloatType& x_min, FloatType& x_ma
     x_max += pixel_to_x * static_cast<FloatType>(margin_x_);
     y_min -= pixel_to_y * static_cast<FloatType>(margin_y_);
     y_max += pixel_to_y * static_cast<FloatType>(margin_y_);
-}
-
-void ImGuiRenderer::load_views_from_file()
-{
-    try
-    {
-        std::string config_path = get_config_file_path();
-        std::ifstream file(config_path);
-        if (!file.is_open())
-        {
-            return;  // File doesn't exist yet, that's okay
-        }
-
-        nlohmann::json json_data;
-        file >> json_data;
-        file.close();
-
-        if (json_data.contains("views") && json_data["views"].is_array())
-        {
-            saved_views_.clear();
-            for (const auto& view_obj : json_data["views"])
-            {
-                if (view_obj.contains("name") && view_obj.contains("x_min") && view_obj.contains("x_max") && view_obj.contains("y_min") && view_obj.contains("y_max") &&
-                    view_obj.contains("max_iterations"))
-                {
-                    std::string name = view_obj["name"];
-                    FloatType x_min = detail::float_from_json(view_obj["x_min"]);
-                    FloatType x_max = detail::float_from_json(view_obj["x_max"]);
-                    FloatType y_min = detail::float_from_json(view_obj["y_min"]);
-                    FloatType y_max = detail::float_from_json(view_obj["y_max"]);
-                    int max_iter = view_obj["max_iterations"];
-                    saved_views_[name] = ViewState(x_min, x_max, y_min, y_max, max_iter);
-                }
-            }
-        }
-
-        // Load the current view if it exists
-        if (json_data.contains("current_view"))
-        {
-            const auto& current_view = json_data["current_view"];
-            if (current_view.contains("x_min") && current_view.contains("x_max") && current_view.contains("y_min") && current_view.contains("y_max") &&
-                current_view.contains("max_iterations"))
-            {
-                FloatType x_min = detail::float_from_json(current_view["x_min"]);
-                FloatType x_max = detail::float_from_json(current_view["x_max"]);
-                FloatType y_min = detail::float_from_json(current_view["y_min"]);
-                FloatType y_max = detail::float_from_json(current_view["y_max"]);
-                int max_iter = current_view["max_iterations"];
-
-                // Store the loaded current view to apply after initialization
-                loaded_current_view_ = ViewState(x_min, x_max, y_min, y_max, max_iter);
-                has_loaded_current_view_ = true;
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        // Silently fail - start with empty views
-        saved_views_.clear();
-        has_loaded_current_view_ = false;
-    }
 }
 
 }  // namespace mandel
