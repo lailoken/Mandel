@@ -131,7 +131,6 @@ ImGuiRenderer::ImGuiRenderer(MandelbrotRenderer* renderer, TextureUpdateCallback
       initial_zoom_(1ULL),
       initial_max_iterations_(0),
       first_window_size_set_(false),
-      threading_enabled_(true),
       controls_window_should_be_transparent_(false),
       has_loaded_current_view_(false),
       has_pending_settings_(false)
@@ -177,17 +176,9 @@ bool ImGuiRenderer::is_render_in_progress() const
         return true;
     }
 
-    if (threading_enabled_)
-    {
-        ThreadPool* pool = renderer_->get_thread_pool();
-        if (pool != nullptr)
-        {
-            // Render is in progress if thread pool is not idle
-            return !pool->is_idle();
-        }
-    }
-
-    return false;
+    ThreadPool* pool = renderer_->get_thread_pool();
+    // Render is in progress if thread pool is not idle
+    return !pool->is_idle();
 }
 
 void ImGuiRenderer::on_pixels_updated(const unsigned char* pixels, int width, int height)
@@ -257,7 +248,7 @@ void ImGuiRenderer::apply_pending_settings_if_ready()
     renderer_->set_zoom(calculated_zoom);
     renderer_->set_max_iterations(max_iter);
 
-    ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+    ThreadPool* pool = renderer_->get_thread_pool();
     renderer_->regenerate(pool);
     is_rendering_ = true;
     
@@ -291,11 +282,8 @@ void ImGuiRenderer::draw()
             {
                 // For thread pool: explicitly reset and wait for all tasks to complete
                 // This ensures no active tasks before we change dimensions
-                if (threading_enabled_)
-                {
-                    ThreadPool* pool = renderer_->get_thread_pool();
-                    pool->pause();
-                }
+                ThreadPool* pool = renderer_->get_thread_pool();
+                pool->pause();
 
                 // Invalidate any pending texture updates to prevent using old pixel data
                 texture_dirty_ = false;
@@ -413,7 +401,6 @@ void ImGuiRenderer::draw()
 
                 // Resize the canvas only - complex plane bounds already set above
                 render_generation_++;
-                ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                 renderer_->init(new_width, new_height, pool);
                 is_rendering_ = true;  // init() triggers a render
                 // Update applied settings after init (init will trigger first render)
@@ -563,7 +550,7 @@ void ImGuiRenderer::draw()
                 {
                     render_generation_++;
                     renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                    ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                    ThreadPool* pool = renderer_->get_thread_pool();
                     renderer_->regenerate(pool);
                     is_rendering_ = true;
                     
@@ -662,7 +649,7 @@ void ImGuiRenderer::draw()
                         
                         // Start the render
                         renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
-                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                        ThreadPool* pool = renderer_->get_thread_pool();
                         
                         // Pan pixel-shift optimization disabled during active drag
                         // Full regenerate is more reliable
@@ -785,7 +772,7 @@ void ImGuiRenderer::draw()
                         render_generation_++;
                         renderer_->set_bounds(new_x_min, new_x_max, new_y_min, new_y_max);
                         renderer_->set_zoom(new_zoom);
-                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                        ThreadPool* pool = renderer_->get_thread_pool();
                         renderer_->regenerate(pool);
                         is_rendering_ = true;
                         
@@ -943,8 +930,6 @@ void ImGuiRenderer::draw()
                 settings_changed = true;
             }
 
-            ImGui::Checkbox("Threading", &threading_enabled_);
-
             // Compare current UI values with applied settings to detect changes (only if zoom wasn't just edited)
             if (!zoom_edited)
             {
@@ -1036,7 +1021,7 @@ void ImGuiRenderer::draw()
                         renderer_->set_bounds(x_min, x_max, y_min, y_max);
                         renderer_->set_zoom(initial_zoom_);
                         renderer_->set_max_iterations(initial_max_iterations_);
-                        ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+                        ThreadPool* pool = renderer_->get_thread_pool();
                         renderer_->regenerate(pool);
                         is_rendering_ = true;
                         // Update applied settings with viewport bounds (not buffer)
@@ -1217,7 +1202,7 @@ void ImGuiRenderer::apply_view_state(const ViewState& state)
         }
         renderer_->set_zoom(calculated_zoom);
     }
-    ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
+    ThreadPool* pool = renderer_->get_thread_pool();
     renderer_->regenerate(pool);
     is_rendering_ = true;
     // Update applied settings and clear pending settings (view state takes precedence)

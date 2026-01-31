@@ -162,8 +162,8 @@ The `-margin_offset` ensures viewport (0,0) shows the center of the buffer. Duri
 bool is_render_in_progress() const {
     // Skip texture_dirty_ when suppressing (it stays true until final upload)
     if (!suppress_texture_updates_ && texture_dirty_) return true;
-    if (threading_enabled_ && !pool->is_idle()) return true;
-    return false;
+    ThreadPool* pool = renderer_->get_thread_pool();
+    return !pool->is_idle();
 }
 ```
 
