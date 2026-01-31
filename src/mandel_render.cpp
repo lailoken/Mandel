@@ -103,6 +103,10 @@ ImGuiRenderer::ImGuiRenderer(MandelbrotRenderer* renderer, TextureUpdateCallback
       texture_back_(0),
       width_(0),
       height_(0),
+      viewport_width_(0),
+      viewport_height_(0),
+      margin_x_(0),
+      margin_y_(0),
       pixels_(nullptr),
       texture_dirty_(false),
       render_generation_(0),
@@ -208,7 +212,7 @@ void ImGuiRenderer::apply_pending_settings_if_ready()
         return;
     }
 
-    // Apply the pending settings
+    // Apply the pending settings (these are viewport bounds)
     FloatType x_min = pending_settings_.x_min;
     FloatType x_max = pending_settings_.x_max;
     FloatType y_min = pending_settings_.y_min;
@@ -229,7 +233,7 @@ void ImGuiRenderer::apply_pending_settings_if_ready()
         std::swap(y_min, y_max);
     }
 
-    // Calculate zoom from bounds
+    // Calculate zoom from viewport bounds (before extending)
     FloatType x_range = x_max - x_min;
     FloatType y_range = y_max - y_min;
     FloatType calculated_zoom = static_cast<FloatType>(1.0);
@@ -243,6 +247,9 @@ void ImGuiRenderer::apply_pending_settings_if_ready()
             calculated_zoom = MandelbrotRenderer::max_zoom;
         }
     }
+
+    // Extend viewport bounds to buffer bounds (add overscan margin)
+    extend_bounds_for_overscan(x_min, x_max, y_min, y_max);
 
     // Apply settings to renderer
     render_generation_++;
@@ -276,11 +283,11 @@ void ImGuiRenderer::draw()
         ImVec2 canvas_size = viewport_size;
         if (canvas_size.x > 0 && canvas_size.y > 0)
         {
-            int new_width = static_cast<int>(canvas_size.x);
-            int new_height = static_cast<int>(canvas_size.y);
+            int new_viewport_width = static_cast<int>(canvas_size.x);
+            int new_viewport_height = static_cast<int>(canvas_size.y);
 
-            // Only resize if dimensions changed
-            if (renderer_->get_width() != new_width || renderer_->get_height() != new_height)
+            // Only resize if viewport dimensions changed
+            if (viewport_width_ != new_viewport_width || viewport_height_ != new_viewport_height)
             {
                 // For thread pool: explicitly reset and wait for all tasks to complete
                 // This ensures no active tasks before we change dimensions
@@ -293,6 +300,16 @@ void ImGuiRenderer::draw()
                 // Invalidate any pending texture updates to prevent using old pixel data
                 texture_dirty_ = false;
                 pixels_ = nullptr;
+
+                // Store viewport size and calculate overscan margins (~1/6 of viewport on each side)
+                viewport_width_ = new_viewport_width;
+                viewport_height_ = new_viewport_height;
+                margin_x_ = (viewport_width_ + 5) / 6;   // ~1/6 viewport, rounded up
+                margin_y_ = (viewport_height_ + 5) / 6;  // ~1/6 viewport, rounded up
+
+                // Render buffer = viewport + 2*margin (margin on each side)
+                int new_width = viewport_width_ + 2 * margin_x_;
+                int new_height = viewport_height_ + 2 * margin_y_;
 
                 // Initialize bounds on first resize only (if not already set)
                 if (!first_window_size_set_)
@@ -315,12 +332,21 @@ void ImGuiRenderer::draw()
                     // Check if we have a loaded current view
                     if (has_loaded_current_view_)
                     {
-                        // Apply the loaded current view
-                        renderer_->set_bounds(loaded_current_view_.x_min, loaded_current_view_.x_max, loaded_current_view_.y_min, loaded_current_view_.y_max);
-                        renderer_->set_max_iterations(loaded_current_view_.max_iterations);
-                        // Calculate zoom from bounds
+                        // Apply the loaded current view - these are viewport bounds, extend for overscan
                         FloatType x_range = loaded_current_view_.x_max - loaded_current_view_.x_min;
                         FloatType y_range = loaded_current_view_.y_max - loaded_current_view_.y_min;
+                        FloatType pixel_to_x = x_range / static_cast<FloatType>(viewport_width_);
+                        FloatType pixel_to_y = y_range / static_cast<FloatType>(viewport_height_);
+
+                        // Extend bounds by margin in complex plane coordinates
+                        FloatType extended_x_min = loaded_current_view_.x_min - pixel_to_x * static_cast<FloatType>(margin_x_);
+                        FloatType extended_x_max = loaded_current_view_.x_max + pixel_to_x * static_cast<FloatType>(margin_x_);
+                        FloatType extended_y_min = loaded_current_view_.y_min - pixel_to_y * static_cast<FloatType>(margin_y_);
+                        FloatType extended_y_max = loaded_current_view_.y_max + pixel_to_y * static_cast<FloatType>(margin_y_);
+
+                        renderer_->set_bounds(extended_x_min, extended_x_max, extended_y_min, extended_y_max);
+                        renderer_->set_max_iterations(loaded_current_view_.max_iterations);
+                        // Calculate zoom from viewport bounds (not extended)
                         FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
                         if (avg_range > static_cast<FloatType>(0.0))
                         {
@@ -335,23 +361,66 @@ void ImGuiRenderer::draw()
                     }
                     else
                     {
-                        // Apply the default initial view
-                        renderer_->set_bounds(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_);
+                        // Apply the default initial view - extend for overscan
+                        FloatType x_range = initial_x_max_ - initial_x_min_;
+                        FloatType y_range = initial_y_max_ - initial_y_min_;
+                        FloatType pixel_to_x = x_range / static_cast<FloatType>(viewport_width_);
+                        FloatType pixel_to_y = y_range / static_cast<FloatType>(viewport_height_);
+
+                        FloatType extended_x_min = initial_x_min_ - pixel_to_x * static_cast<FloatType>(margin_x_);
+                        FloatType extended_x_max = initial_x_max_ + pixel_to_x * static_cast<FloatType>(margin_x_);
+                        FloatType extended_y_min = initial_y_min_ - pixel_to_y * static_cast<FloatType>(margin_y_);
+                        FloatType extended_y_max = initial_y_max_ + pixel_to_y * static_cast<FloatType>(margin_y_);
+
+                        renderer_->set_bounds(extended_x_min, extended_x_max, extended_y_min, extended_y_max);
                         renderer_->set_zoom(initial_zoom_);
                     }
                     first_window_size_set_ = true;
                 }
+                else
+                {
+                    // Resize while preserving the viewport center - need to recalculate extended bounds
+                    // Get current viewport bounds (center of the buffer)
+                    FloatType current_x_min = renderer_->get_x_min();
+                    FloatType current_x_max = renderer_->get_x_max();
+                    FloatType current_y_min = renderer_->get_y_min();
+                    FloatType current_y_max = renderer_->get_y_max();
 
-                // Resize the canvas only - complex plane bounds remain unchanged
+                    // These are buffer bounds; calculate viewport bounds (center portion)
+                    FloatType x_range = current_x_max - current_x_min;
+                    FloatType y_range = current_y_max - current_y_min;
+                    FloatType center_x = (current_x_min + current_x_max) / static_cast<FloatType>(2.0);
+                    FloatType center_y = (current_y_min + current_y_max) / static_cast<FloatType>(2.0);
+
+                    // Calculate new pixel-to-complex ratio based on new viewport size
+                    // Keep the center fixed, calculate new range proportional to new viewport
+                    int old_buffer_width = width_ > 0 ? width_ : new_width;
+                    int old_buffer_height = height_ > 0 ? height_ : new_height;
+                    FloatType old_pixel_to_x = x_range / static_cast<FloatType>(old_buffer_width);
+                    FloatType old_pixel_to_y = y_range / static_cast<FloatType>(old_buffer_height);
+
+                    // New buffer bounds based on new size but same pixel scale
+                    FloatType new_x_range = old_pixel_to_x * static_cast<FloatType>(new_width);
+                    FloatType new_y_range = old_pixel_to_y * static_cast<FloatType>(new_height);
+
+                    FloatType extended_x_min = center_x - new_x_range / static_cast<FloatType>(2.0);
+                    FloatType extended_x_max = center_x + new_x_range / static_cast<FloatType>(2.0);
+                    FloatType extended_y_min = center_y - new_y_range / static_cast<FloatType>(2.0);
+                    FloatType extended_y_max = center_y + new_y_range / static_cast<FloatType>(2.0);
+
+                    renderer_->set_bounds(extended_x_min, extended_x_max, extended_y_min, extended_y_max);
+                }
+
+                // Resize the canvas only - complex plane bounds already set above
                 render_generation_++;
                 ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                 renderer_->init(new_width, new_height, pool);
                 is_rendering_ = true;  // init() triggers a render
                 // Update applied settings after init (init will trigger first render)
+                // Use viewport bounds for UI consistency
                 if (renderer_ && first_window_size_set_)
                 {
-                    applied_settings_ =
-                        ViewState(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
+                    applied_settings_ = get_viewport_bounds();
                 }
                 // Reset visual state since dimensions changed
                 display_offset_x_ = 0.0f;
@@ -400,9 +469,14 @@ void ImGuiRenderer::draw()
             // offset = zoom_center - zoom_center * scale = zoom_center * (1 - scale)
             float scale_offset_x = zoom_center_x_ * (1.0f - display_scale_);
             float scale_offset_y = zoom_center_y_ * (1.0f - display_scale_);
-            
-            ImVec2 image_min(scale_offset_x + display_offset_x_, scale_offset_y + display_offset_y_);
-            ImVec2 image_max(scale_offset_x + scaled_width + display_offset_x_, scale_offset_y + scaled_height + display_offset_y_);
+
+            // Offset by -margin so viewport (0,0) shows the center of the buffer
+            // The margin offset also scales with display_scale_ for proper zoom behavior
+            float margin_offset_x = static_cast<float>(margin_x_) * display_scale_;
+            float margin_offset_y = static_cast<float>(margin_y_) * display_scale_;
+
+            ImVec2 image_min(scale_offset_x + display_offset_x_ - margin_offset_x, scale_offset_y + display_offset_y_ - margin_offset_y);
+            ImVec2 image_max(scale_offset_x + scaled_width + display_offset_x_ - margin_offset_x, scale_offset_y + scaled_height + display_offset_y_ - margin_offset_y);
             draw_list->AddImage(texture_front_, image_min, image_max);
 
             // Create an invisible full-screen window to capture mouse input on the background
@@ -442,9 +516,10 @@ void ImGuiRenderer::draw()
                 float mouse_x = std::max(0.0f, std::min(mouse_pos.x, viewport_size.x));
                 float mouse_y = std::max(0.0f, std::min(mouse_pos.y, viewport_size.y));
 
-                // Convert to pixel coordinates within the image
-                float pixel_x = (mouse_x / viewport_size.x) * static_cast<float>(width_);
-                float pixel_y = (mouse_y / viewport_size.y) * static_cast<float>(height_);
+                // Convert to pixel coordinates within the buffer (add margin offset)
+                // Screen pixel (0,0) maps to buffer pixel (margin_x_, margin_y_)
+                float pixel_x = mouse_x + static_cast<float>(margin_x_);
+                float pixel_y = mouse_y + static_cast<float>(margin_y_);
 
                 // Get current bounds
                 FloatType current_x_min = renderer_->get_x_min();
@@ -513,10 +588,10 @@ void ImGuiRenderer::draw()
                 float mouse_x = std::max(0.0f, std::min(mouse_pos.x, viewport_size.x));
                 float mouse_y = std::max(0.0f, std::min(mouse_pos.y, viewport_size.y));
 
-                // Convert to pixel coordinates within the image
-                // Image fills the entire viewport
-                float pixel_x = (mouse_x / viewport_size.x) * static_cast<float>(width_);
-                float pixel_y = (mouse_y / viewport_size.y) * static_cast<float>(height_);
+                // Convert to pixel coordinates within the buffer (add margin offset)
+                // Screen pixel (0,0) maps to buffer pixel (margin_x_, margin_y_)
+                float pixel_x = mouse_x + static_cast<float>(margin_x_);
+                float pixel_y = mouse_y + static_cast<float>(margin_y_);
 
                 // Handle dragging
                 if (is_active && ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -543,10 +618,12 @@ void ImGuiRenderer::draw()
                     // Calculate pending offset (how much we've dragged past what's being rendered)
                     float pending_offset_x = display_offset_x_ - render_start_offset_x_;
                     float pending_offset_y = display_offset_y_ - render_start_offset_y_;
-                    
-                    // Start a new render if we have significant offset beyond current render
-                    constexpr float start_threshold = 1.0f;
-                    constexpr float restart_threshold = 64.0f;
+
+                    // Start a new render when we've used up most of the overscan margin
+                    // Use 80% of margin as threshold - gives buffer before edge becomes visible
+                    float start_threshold = static_cast<float>(std::min(margin_x_, margin_y_)) * 0.8f;
+                    // When already rendering, use full margin to avoid constant re-rendering
+                    float restart_threshold = static_cast<float>(std::min(margin_x_, margin_y_));
                     float threshold = is_rendering_ ? restart_threshold : start_threshold;
                     
                     if (std::abs(pending_offset_x) >= threshold || std::abs(pending_offset_y) >= threshold)
@@ -696,12 +773,12 @@ void ImGuiRenderer::draw()
                         // zoom_factor > 1 means zooming in (stretch texture)
                         // zoom_factor < 1 means zooming out (shrink texture)
                         display_scale_ = static_cast<float>(zoom_factor);
-                        
-                        // Set zoom center to mouse position (in screen pixels)
+
+                        // Set zoom center to mouse position (in screen pixels, not buffer pixels)
                         // The point under the mouse should stay fixed during scaling
-                        zoom_center_x_ = pixel_x;
-                        zoom_center_y_ = pixel_y;
-                        
+                        zoom_center_x_ = mouse_x;
+                        zoom_center_y_ = mouse_y;
+
                         // Suppress texture updates during zoom - keep showing old content scaled
                         suppress_texture_updates_ = true;
                         
@@ -766,11 +843,24 @@ void ImGuiRenderer::draw()
             }
 
             // Get current settings (from renderer if no pending, otherwise from pending)
+            // Use viewport bounds (what user sees), not buffer bounds
             int max_iter = has_pending_settings_ ? pending_settings_.max_iterations : renderer_->get_max_iterations();
-            FloatType x_min = has_pending_settings_ ? pending_settings_.x_min : renderer_->get_x_min();
-            FloatType x_max = has_pending_settings_ ? pending_settings_.x_max : renderer_->get_x_max();
-            FloatType y_min = has_pending_settings_ ? pending_settings_.y_min : renderer_->get_y_min();
-            FloatType y_max = has_pending_settings_ ? pending_settings_.y_max : renderer_->get_y_max();
+            FloatType x_min, x_max, y_min, y_max;
+            if (has_pending_settings_)
+            {
+                x_min = pending_settings_.x_min;
+                x_max = pending_settings_.x_max;
+                y_min = pending_settings_.y_min;
+                y_max = pending_settings_.y_max;
+            }
+            else
+            {
+                ViewState viewport = get_viewport_bounds();
+                x_min = viewport.x_min;
+                x_max = viewport.x_max;
+                y_min = viewport.y_min;
+                y_max = viewport.y_max;
+            }
 
             // Calculate zoom from bounds (always derive from current bounds, not from renderer)
             FloatType zoom = static_cast<FloatType>(1.0);
@@ -900,9 +990,9 @@ void ImGuiRenderer::draw()
             }
             if (ImGui::Button("Save Current View"))
             {
-                // Save current view state
-                ViewState current_state(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
-                saved_views_[new_view_name] = current_state;
+                // Save current viewport state (not buffer bounds)
+                ViewState viewport = get_viewport_bounds();
+                saved_views_[new_view_name] = viewport;
                 new_view_name_buffer_[0] = '\0';  // Clear the buffer
                 // Save immediately on manual edit
                 save_views_to_file(false);  // Don't save current view (only named views)
@@ -935,15 +1025,21 @@ void ImGuiRenderer::draw()
                 {
                     if (ImGui::Selectable("<Initial>", false, ImGuiSelectableFlags_AllowDoubleClick))
                     {
-                        // Apply reset state
+                        // Apply reset state - extend for overscan
+                        FloatType x_min = initial_x_min_;
+                        FloatType x_max = initial_x_max_;
+                        FloatType y_min = initial_y_min_;
+                        FloatType y_max = initial_y_max_;
+                        extend_bounds_for_overscan(x_min, x_max, y_min, y_max);
+
                         render_generation_++;
-                        renderer_->set_bounds(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_);
+                        renderer_->set_bounds(x_min, x_max, y_min, y_max);
                         renderer_->set_zoom(initial_zoom_);
                         renderer_->set_max_iterations(initial_max_iterations_);
                         ThreadPool* pool = threading_enabled_ ? renderer_->get_thread_pool() : nullptr;
                         renderer_->regenerate(pool);
                         is_rendering_ = true;
-                        // Update applied settings and clear pending settings
+                        // Update applied settings with viewport bounds (not buffer)
                         applied_settings_ = ViewState(initial_x_min_, initial_x_max_, initial_y_min_, initial_y_max_, initial_max_iterations_);
                         has_pending_settings_ = false;
                         // Reset visual state
@@ -1098,8 +1194,16 @@ void ImGuiRenderer::apply_view_state(const ViewState& state)
     }
 
     render_generation_++;
-    renderer_->set_bounds(state.x_min, state.x_max, state.y_min, state.y_max);
-    // Calculate zoom from bounds
+
+    // Extend viewport bounds to buffer bounds (add overscan margin)
+    FloatType x_min = state.x_min;
+    FloatType x_max = state.x_max;
+    FloatType y_min = state.y_min;
+    FloatType y_max = state.y_max;
+    extend_bounds_for_overscan(x_min, x_max, y_min, y_max);
+
+    renderer_->set_bounds(x_min, x_max, y_min, y_max);
+    // Calculate zoom from viewport bounds (not extended)
     FloatType x_range = state.x_max - state.x_min;
     FloatType y_range = state.y_max - state.y_min;
     FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
@@ -1140,9 +1244,9 @@ void ImGuiRenderer::save_view_state(const std::string& name)
     auto it = saved_views_.find(name);
     if (it != saved_views_.end())
     {
-        // Update the existing view with current renderer state
-        ViewState current_state(renderer_->get_x_min(), renderer_->get_x_max(), renderer_->get_y_min(), renderer_->get_y_max(), renderer_->get_max_iterations());
-        it->second = current_state;
+        // Update the existing view with current viewport state (not buffer bounds)
+        ViewState viewport = get_viewport_bounds();
+        it->second = viewport;
         // Save immediately on manual edit
         save_views_to_file(false);  // Don't save current view (only named views)
     }
@@ -1180,14 +1284,16 @@ void ImGuiRenderer::save_views_to_file(bool include_current_view)
         }
 
         // Save current view state only if requested (on exit)
+        // Save viewport bounds (what user sees), not buffer bounds
         if (include_current_view && renderer_ != nullptr)
         {
+            ViewState viewport = get_viewport_bounds();
             nlohmann::json current_view;
-            current_view["x_min"] = detail::float_to_json(renderer_->get_x_min());
-            current_view["x_max"] = detail::float_to_json(renderer_->get_x_max());
-            current_view["y_min"] = detail::float_to_json(renderer_->get_y_min());
-            current_view["y_max"] = detail::float_to_json(renderer_->get_y_max());
-            current_view["max_iterations"] = renderer_->get_max_iterations();
+            current_view["x_min"] = detail::float_to_json(viewport.x_min);
+            current_view["x_max"] = detail::float_to_json(viewport.x_max);
+            current_view["y_min"] = detail::float_to_json(viewport.y_min);
+            current_view["y_max"] = detail::float_to_json(viewport.y_max);
+            current_view["max_iterations"] = viewport.max_iterations;
             json_data["current_view"] = current_view;
         }
 
@@ -1202,6 +1308,54 @@ void ImGuiRenderer::save_views_to_file(bool include_current_view)
     {
         // Silently fail - user can still use views in this session
     }
+}
+
+ViewState ImGuiRenderer::get_viewport_bounds() const
+{
+    if (renderer_ == nullptr || width_ <= 0 || height_ <= 0)
+    {
+        return ViewState();
+    }
+
+    // Buffer bounds from renderer
+    FloatType buffer_x_min = renderer_->get_x_min();
+    FloatType buffer_x_max = renderer_->get_x_max();
+    FloatType buffer_y_min = renderer_->get_y_min();
+    FloatType buffer_y_max = renderer_->get_y_max();
+
+    // Calculate pixel-to-complex ratio
+    FloatType x_range = buffer_x_max - buffer_x_min;
+    FloatType y_range = buffer_y_max - buffer_y_min;
+    FloatType pixel_to_x = x_range / static_cast<FloatType>(width_);
+    FloatType pixel_to_y = y_range / static_cast<FloatType>(height_);
+
+    // Viewport bounds = buffer bounds shrunk by margin
+    FloatType viewport_x_min = buffer_x_min + pixel_to_x * static_cast<FloatType>(margin_x_);
+    FloatType viewport_x_max = buffer_x_max - pixel_to_x * static_cast<FloatType>(margin_x_);
+    FloatType viewport_y_min = buffer_y_min + pixel_to_y * static_cast<FloatType>(margin_y_);
+    FloatType viewport_y_max = buffer_y_max - pixel_to_y * static_cast<FloatType>(margin_y_);
+
+    return ViewState(viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max, renderer_->get_max_iterations());
+}
+
+void ImGuiRenderer::extend_bounds_for_overscan(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const
+{
+    if (viewport_width_ <= 0 || viewport_height_ <= 0)
+    {
+        return;
+    }
+
+    // Calculate pixel-to-complex ratio based on viewport
+    FloatType x_range = x_max - x_min;
+    FloatType y_range = y_max - y_min;
+    FloatType pixel_to_x = x_range / static_cast<FloatType>(viewport_width_);
+    FloatType pixel_to_y = y_range / static_cast<FloatType>(viewport_height_);
+
+    // Extend bounds by margin
+    x_min -= pixel_to_x * static_cast<FloatType>(margin_x_);
+    x_max += pixel_to_x * static_cast<FloatType>(margin_x_);
+    y_min -= pixel_to_y * static_cast<FloatType>(margin_y_);
+    y_max += pixel_to_y * static_cast<FloatType>(margin_y_);
 }
 
 void ImGuiRenderer::load_views_from_file()

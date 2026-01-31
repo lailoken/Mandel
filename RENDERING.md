@@ -5,6 +5,7 @@
 1. **Buttery smooth interaction** - Dragging and zooming feel instant
 2. **Progressive refinement** - See results as computed (when idle)
 3. **No visual glitches** - No tearing, flickering, or jarring transitions
+4. **Simplify** - Keep this document simple and concise, and the code even simpler and as small as possible.
 
 ---
 
@@ -21,6 +22,7 @@
 - Owns two GPU textures: `texture_front_` (displayed), `texture_back_` (upload target)
 - Handles user input (drag, zoom, double-click)
 - Manages visual offset/scale for responsive interaction
+- Manages overscan buffer (~1/6 viewport on each side) to support smooth panning/zooming
 
 ---
 
@@ -31,10 +33,52 @@ MandelbrotRenderer::pixels_  →  upload to texture_back_
                                       ↓
                               std::swap(front, back)
                                       ↓
-                              draw texture_front_
+                              draw texture_front_ (with margin offset)
 ```
 
 Never modify the displayed texture. Upload to back, swap to front.
+
+---
+
+## Overscan
+
+To improve panning and zooming experience, we render a larger area than visible on screen.
+
+*   **Viewport**: The actual screen area (e.g., 800×600)
+*   **Overscan Margin**: ~1/6 of viewport on each side (`(viewport + 5) / 6`)
+*   **Render Buffer**: Viewport + 2 × Margin (e.g., for 800×600: margin=134, buffer=1068×868)
+
+The texture is drawn offset by `-margin` so the viewport aligns with the center of the render buffer.
+
+### Implementation Details
+```cpp
+// Calculate margins (~1/6 viewport, rounded up)
+margin_x_ = (viewport_width_ + 5) / 6;
+margin_y_ = (viewport_height_ + 5) / 6;
+
+// Buffer dimensions
+width_ = viewport_width_ + 2 * margin_x_;
+height_ = viewport_height_ + 2 * margin_y_;
+
+// Drawing position (margin offset scales with zoom)
+float margin_offset_x = margin_x_ * display_scale_;
+ImVec2 image_min(scale_offset_x + display_offset_x_ - margin_offset_x, ...);
+
+// Screen to buffer pixel conversion
+float pixel_x = mouse_x + margin_x_;  // screen(0,0) → buffer(margin,margin)
+```
+
+### Bounds Conversion
+- **Buffer bounds**: What renderer stores (includes overscan)
+- **Viewport bounds**: What user sees/saves (center portion of buffer)
+```cpp
+// Viewport → Buffer: extend by margin in complex coords
+pixel_to_x = viewport_range / viewport_width;
+buffer_x_min = viewport_x_min - pixel_to_x * margin_x_;
+
+// Buffer → Viewport: shrink by margin in complex coords
+viewport_x_min = buffer_x_min + pixel_to_x * margin_x_;
+```
 
 ---
 
@@ -62,9 +106,8 @@ bool suppress_texture_updates_;                        // Skip uploads during in
    - `suppress_texture_updates_ = false`
 
 ### Coordinate Conversion
-Use **texture size** (width_/height_), not viewport_size. The texture is drawn at its actual
-pixel dimensions, so 1 pixel of visual offset = (x_range / width_) complex units. Using
-viewport_size causes drift due to float-to-int truncation when resizing.
+Use **render size** (width_/height_) for conversion, but be aware of margins.
+
 ```cpp
 FloatType screen_to_x = x_range / static_cast<FloatType>(width_);
 FloatType pan_x = -pending_offset * screen_to_x;
@@ -100,13 +143,16 @@ zoom_factor = pow(1.0 + zoom_step_, wheel_delta);
    - `display_scale_ = 1.0`
    - `suppress_texture_updates_ = false`
 
-### Drawing with Scale
+### Drawing with Scale and Overscan
 ```cpp
 float scale_offset_x = zoom_center_x_ * (1.0f - display_scale_);
-float scale_offset_y = zoom_center_y_ * (1.0f - display_scale_);
-ImVec2 image_min(scale_offset_x + display_offset_x_, scale_offset_y + display_offset_y_);
-ImVec2 image_max(scale_offset_x + scaled_width + display_offset_x_, ...);
+float margin_offset_x = margin_x_ * display_scale_;  // margin scales with zoom
+float draw_pos_x = scale_offset_x + display_offset_x_ - margin_offset_x;
+ImVec2 image_min(draw_pos_x, ...);
+ImVec2 image_max(draw_pos_x + scaled_width, ...);
 ```
+
+The `-margin_offset` ensures viewport (0,0) shows the center of the buffer. During zoom, the margin offset also scales so the zoom center stays fixed.
 
 ---
 
@@ -165,9 +211,10 @@ Each frame:
 ## Constants
 
 ```cpp
-constexpr float start_threshold = 1.0f;    // Offset to trigger render (idle)
-constexpr float restart_threshold = 64.0f; // Offset to restart render (busy)
-constexpr FloatType zoom_step_ = 0.5;      // Zoom base = 1.5
+// Panning thresholds (derived from overscan margin)
+float start_threshold = margin * 0.8f;   // Trigger render at 80% of margin
+float restart_threshold = margin;         // Restart threshold = full margin
+constexpr FloatType zoom_step_ = 0.5;     // Zoom base = 1.5
 ```
 
 ---
@@ -183,3 +230,4 @@ constexpr FloatType zoom_step_ = 0.5;      // Zoom base = 1.5
 | Offset preservation | Subtract `render_start_offset_` on completion |
 | Interruptible | Generation counter invalidates stale tasks |
 | Fast rendering | Boundary-trace with flood fill, parallel ThreadPool |
+| Overscan | Buffer is ~1.33x viewport to allow smooth panning/zooming without edges |

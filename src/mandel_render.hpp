@@ -55,13 +55,21 @@ private:
     void load_views_from_file();                                // Load saved views from JSON file
     std::string get_config_file_path() const;                   // Get the path to the config file (~/.mandel)
 
+    // Convert between buffer bounds (with overscan) and viewport bounds (what user sees)
+    ViewState get_viewport_bounds() const;                                                                          // Get viewport bounds from current buffer bounds
+    void extend_bounds_for_overscan(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const;  // Extend viewport bounds to buffer bounds
+
     constexpr static FloatType zoom_step_ = static_cast<FloatType>(0.5);
 
     MandelbrotRenderer* renderer_;
     ImTextureID texture_front_;  // Currently displayed texture
     ImTextureID texture_back_;   // Receives new uploads, then swapped to front
-    int width_;
-    int height_;
+    int width_;                  // Render buffer width (viewport + 2*margin)
+    int height_;                 // Render buffer height (viewport + 2*margin)
+    int viewport_width_;         // Actual screen viewport width
+    int viewport_height_;        // Actual screen viewport height
+    int margin_x_;               // Overscan margin on each side (horizontal)
+    int margin_y_;               // Overscan margin on each side (vertical)
     const unsigned char* pixels_;
     bool texture_dirty_;
     unsigned int render_generation_;  // Counter for debugging
@@ -104,9 +112,6 @@ private:
 
     // Track if first window resize has happened
     bool first_window_size_set_;
-    
-    // Track threading state (controlled by UI checkbox)
-    bool threading_enabled_;
 
     // Track controls window transparency state
     bool controls_window_should_be_transparent_;
