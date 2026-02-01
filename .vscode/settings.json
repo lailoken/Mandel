@@ -1,0 +1,64 @@
+{
+    "editor.formatOnType": true,
+    "editor.formatOnSave": true,
+    "editor.formatOnPaste": true,
+    "editor.formatOnSaveMode": "modifications",
+    "editor.tabSize": 4,
+    "editor.detectIndentation": false,
+    "files.exclude": {
+        "**/.git": true,
+        "**/.DS_Store": true,
+        ".cache": true,
+        "build": true
+    },
+    "search.exclude": {
+        "**/.git": true,
+        "**/.DS_Store": true,
+        ".cache": true,
+        "build": true
+    },
+    "eslint.enable": true,
+    "prettier.singleQuote": true,
+    "prettier.trailingComma": "all",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/Debug/compile_commands.json",
+    "C_Cpp.default.cppStandard": "c++20",
+    "C_Cpp.default.browse.databaseFilename": "${workspaceFolder}/.vscode/browse.vc.db",
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.enhancedColorization": "disabled",
+    "clangd.arguments": [
+        "--compile-commands-dir=build/Debug",
+        "--background-index",
+        "--clang-tidy",
+        "--header-insertion=never"
+    ],
+    "C_Cpp.default.browse.limitSymbolsToIncludedHeaders": false,
+    "C_Cpp.workspaceParsingPriority": "highest",
+    "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+    "C_Cpp.codeAnalysis.clangTidy.path": "/usr/bin/clang-tidy",
+    "C_Cpp.codeAnalysis.clangTidy.args": [
+        "--extra-arg=-Wno-unknown-warning-option",
+        "--extra-arg=-Wno-error"
+    ],
+    "C_Cpp.codeAnalysis.clangTidy.useBuildPath": true,
+    "cmake.buildDirectory": "${workspaceFolder}/build/Debug",
+    "cmake.configureOnEdit": true,
+    "cmake.configureOnOpen": false,
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmake.configureSettings": {
+        "CMAKE_BUILD_TYPE": "Debug"
+    },
+    "[html]": {
+        "editor.formatOnSave": false,
+        "editor.formatOnType": false,
+        "editor.defaultFormatter": null
+    },
+    "[cpp]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    },
+    "[c]": {
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+    },
+    "files.associations": {
+        "*.inl": "cpp"
+    }
+}

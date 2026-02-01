@@ -1,13 +1,14 @@
 #include "imgui.h"
 
+#include <GL/gl.h>
 #include <iostream>
 #include <SDL2/SDL.h>
-#include <GL/gl.h>
+#include <thread>
 
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl2.h"
-#include "mandel.hpp"
-#include "mandel_render.hpp"
+#include "mandel_ui.hpp"
+#include "thread_pool.hpp"
 
 // Platform-specific texture management functions (OpenGL/SDL)
 // These handle texture creation/update/deletion for the SDL/OpenGL platform
@@ -91,13 +92,13 @@ int main(int /* argc */, char* /* argv */[])
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
-    // Create Mandelbrot renderer with long double precision
-    mandel::MandelbrotRenderer mandelbrot(800, 800);
-    
-    // Create and set up ImGui renderer (platform-agnostic, uses ImGui canvas/rendering)
+    // Create thread pool (shared by all components)
+    ThreadPool thread_pool(std::thread::hardware_concurrency());
+
+    // Create and set up UI (handles overscan, user input, texture management)
     // Platform-specific texture operations are handled via callbacks
-    mandel::ImGuiRenderer renderer(&mandelbrot, update_texture_opengl, delete_texture_opengl);
-    mandelbrot.set_render_callback(&renderer);
+    // Thread pool is passed to UI, which creates and manages its own worker
+    mandel::MandelUI ui(update_texture_opengl, delete_texture_opengl, &thread_pool);
 
     // Main loop
     bool done = false;
@@ -125,7 +126,7 @@ int main(int /* argc */, char* /* argv */[])
         // run imgui sample:
         // ImGui::ShowDemoWindow();
 
-        renderer.draw();
+        ui.draw();
 
         // Rendering
         ImGui::Render();

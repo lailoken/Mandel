@@ -4,8 +4,15 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
+
+#ifdef _DEBUG
+#define DEBUG_PRINTF(...) printf(__VA_ARGS__)
+#else
+#define DEBUG_PRINTF(...) ((void)0)
+#endif
 
 #include "thread_pool.hpp"
 
@@ -40,6 +47,13 @@ ColorScheme::ColorScheme(int count)
     }
 }
 
+// Singleton implementation - thread-safe initialization using static local variable
+const ColorScheme& ColorScheme::get_instance()
+{
+    static const ColorScheme instance(256);  // Default palette size
+    return instance;
+}
+
 // CanvasMetrics implementation
 CanvasMetrics::CanvasMetrics(int w, int h, FloatType xmin, FloatType xmax, FloatType ymin, FloatType ymax)
     : width(w)
@@ -61,34 +75,36 @@ CanvasMetrics::CanvasMetrics(int w, int h, FloatType xmin, FloatType xmax, Float
 }
 
 // MandelbrotRenderer implementation
-MandelbrotRenderer::MandelbrotRenderer(int width, int height)
+MandelbrotRenderer::MandelbrotRenderer(int width, int height, FloatType x_min, FloatType x_max, FloatType y_min, FloatType y_max, int max_iterations,
+                                       std::atomic<unsigned int>& current_generation, unsigned int start_generation, ThreadPool& thread_pool)
     : width_(width),
       height_(height),
-      x_min_(static_cast<FloatType>(-2.5)),
-      x_max_(static_cast<FloatType>(1.5)),
-      y_min_(static_cast<FloatType>(-2.0)),
-      y_max_(static_cast<FloatType>(2.0)),
-      zoom_(1ULL),
-      max_iterations_(512),
-      palette_(32),
-      metrics_(width, height, x_min_, x_max_, y_min_, y_max_),
-      render_callback_(nullptr)
+      x_min_(x_min),
+      x_max_(x_max),
+      y_min_(y_min),
+      y_max_(y_max),
+      max_iterations_(max_iterations),
+      pixels_(static_cast<size_t>(width) * static_cast<size_t>(height) * 4),  // Allocate internal buffer (RGBA)
+      metrics_(width, height, x_min, x_max, y_min, y_max),
+      thread_pool_(thread_pool),
+      current_generation_ref_(&current_generation)
 {
-    init(width, height);
+    // Initialize buffer to black with alpha=255
+    size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
+    std::memset(pixels_.data(), 0, pixel_count);
+    for (size_t i = 3; i < pixel_count; i += 4)
+    {
+        pixels_[i] = 255;  // Alpha
+    }
+
+    // Start rendering immediately
+    // Worker ensures all tasks complete before destroying renderer
+    DEBUG_PRINTF("[RENDERER] Constructor: this=%p, start_gen=%u\n", static_cast<void*>(this), start_generation);
+    unsigned int current_gen = current_generation.load();
+    generate_mandelbrot(start_generation, current_gen);
 }
 
-void MandelbrotRenderer::init(int width, int height, ThreadPool* thread_pool)
-{
-    width_ = width;
-    height_ = height;
-    metrics_ = CanvasMetrics(width, height, x_min_, x_max_, y_min_, y_max_);
-    regenerate(thread_pool);
-}
-
-void MandelbrotRenderer::set_render_callback(RenderCallback* callback)
-{
-    render_callback_ = callback;
-}
+MandelbrotRenderer::~MandelbrotRenderer() { DEBUG_PRINTF("[RENDERER] Destructor: this=%p\n", static_cast<void*>(this)); }
 
 int MandelbrotRenderer::compute_mandelbrot(::std::complex<FloatType> c, int max_iter) const
 {
@@ -138,9 +154,10 @@ inline int MandelbrotRenderer::process_pixel(int32_t x_pos, int32_t y_pos)
 
     int iter = compute_mandelbrot(c, max_iterations_);
 
-    // Cache palette size and optimize color lookup
-    size_t palette_size = palette_.palette.size();
-    auto const& color = iter == max_iterations_ ? ColorScheme::black : palette_.palette[static_cast<size_t>(iter) % palette_size];
+    // Cache palette size and optimize color lookup - use singleton
+    const ColorScheme& palette = ColorScheme::get_instance();
+    size_t palette_size = palette.palette.size();
+    auto const& color = iter == max_iterations_ ? ColorScheme::black : palette.palette[static_cast<size_t>(iter) % palette_size];
 
     // Inline paint_pixel to avoid function call overhead
     // Alpha channel already set to 255 during initialization, only need to set RGB
@@ -153,22 +170,42 @@ inline int MandelbrotRenderer::process_pixel(int32_t x_pos, int32_t y_pos)
     return iter;
 }
 
-void MandelbrotRenderer::generate_mandelbrot_direct(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max)
+void MandelbrotRenderer::generate_mandelbrot_direct(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, unsigned int start_generation, unsigned int /*current_generation*/)
 {
+    // Check if this render has been superseded by a newer one
+    unsigned int current_gen_check = current_generation_ref_->load();
+    if (start_generation != current_gen_check)
+    {
+        return;  // Stale render, exit early
+    }
+
     // Optimize: precompute frequently used values outside loops
     const FloatType pixel_to_x = metrics_.pixel_to_x;
     const FloatType pixel_to_y = metrics_.pixel_to_y;
     const FloatType x_min_coord = metrics_.x_min;
     const FloatType y_min_coord = metrics_.y_min;
     const int max_iter = max_iterations_;
-    const size_t palette_size = palette_.palette.size();
-    const int width_4 = width_ * 4;  // Precompute width * 4 for pixel indexing
+    const ColorScheme& palette = ColorScheme::get_instance();
+    const size_t palette_size = palette.palette.size();
+    const size_t width_4 = static_cast<size_t>(width_) * 4;  // Use size_t to prevent overflow
     const FloatType escape_radius_sq = static_cast<FloatType>(4.0);
+    const size_t pixels_size = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 4;
 
     // Precompute row base offsets to avoid repeated multiplication
     for (int32_t y_pos = y_min; y_pos <= y_max; ++y_pos)
     {
-        const int row_base = y_pos * width_4;
+        // Check generation periodically to allow early bailout
+        if (y_pos % 16 == 0)  // Check every 16 rows
+        {
+            unsigned int current_gen_check_periodic = current_generation_ref_->load();
+            if (start_generation != current_gen_check_periodic)
+            {
+                return;  // Stale render, exit early
+            }
+        }
+
+        // Calculate row_base using size_t to prevent overflow
+        const size_t row_base = static_cast<size_t>(y_pos) * width_4;
         const FloatType cy = y_min_coord + pixel_to_y * y_pos;
 
         for (int32_t x_pos = x_min; x_pos <= x_max; ++x_pos)
@@ -198,23 +235,35 @@ void MandelbrotRenderer::generate_mandelbrot_direct(int32_t x_min, int32_t x_max
 
             // Color lookup and pixel painting
             // Alpha channel already set to 255 during initialization, only need to set RGB
-            const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette_.palette[static_cast<size_t>(iter) % palette_size];
-            int idx = row_base + x_pos * 4;
-            pixels_[idx + 0] = color[0];
-            pixels_[idx + 1] = color[1];
-            pixels_[idx + 2] = color[2];
-            // Alpha channel (idx + 3) already 255, no need to set
+            const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette.palette[static_cast<size_t>(iter) % palette_size];
+            // Calculate idx using size_t to prevent overflow
+            size_t idx = row_base + static_cast<size_t>(x_pos) * 4;
+
+            // Bounds check: ensure we can write 4 bytes (idx through idx+3)
+            if (idx + 3 < pixels_size)
+            {
+                // Write pixel directly - generation check already done, no mutex needed
+                // UI doesn't block on pixel writes; generation check bails out stale renders
+                pixels_[idx + 0] = color[0];
+                pixels_[idx + 1] = color[1];
+                pixels_[idx + 2] = color[2];
+                // Alpha channel (idx + 3) already 255, no need to set
+            }
         }
     }
 }
 
-void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, ThreadPool* thread_pool, unsigned int generation)
+void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, unsigned int start_generation, unsigned int current_generation)
 {
     // Check if this render has been superseded by a newer one
-    if (generation != render_generation_.load())
+    if (start_generation != current_generation)
     {
+        DEBUG_PRINTF("[RENDERER] Recurse bailed: start_gen=%u != current_gen=%u, renderer=%p\n", start_generation, current_generation, static_cast<void*>(this));
         return;  // Stale render, exit early
     }
+
+    // CRITICAL: Capture gen_ref at the start to avoid accessing current_generation_ref_ after renderer might be destroyed
+    std::atomic<unsigned int>* gen_ref = current_generation_ref_;
 
     // Precompute frequently used values to avoid repeated member access
     const FloatType pixel_to_x = metrics_.pixel_to_x;
@@ -222,19 +271,41 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
     const FloatType x_min_coord = metrics_.x_min;
     const FloatType y_min_coord = metrics_.y_min;
     const int max_iter = max_iterations_;
-    const size_t palette_size = palette_.palette.size();
-    const int width_4 = width_ * 4;
-    const FloatType escape_radius_sq = static_cast<FloatType>(4.0);
+    const size_t width_4 = static_cast<size_t>(width_) * 4;  // Use size_t to prevent overflow
 
-    // Helper lambda for fast pixel processing (inlined)
-    auto fast_process_pixel = [&](int32_t x_pos, int32_t y_pos) -> int
+    // Capture size and dimensions for bounds checking
+    size_t pixels_size = pixels_.size();
+    int width = width_;
+    int height = height_;
+
+    // Capture this pointer AND the pixels data pointer - worker ensures renderer outlives all tasks
+    // CRITICAL: Capture pixels_data pointer at lambda creation time, not inside the lambda
+    // This avoids accessing self->pixels_.data() after renderer might be destroyed
+    // CRITICAL: Capture thread_pool pointer to avoid accessing self->thread_pool_ after renderer might be destroyed
+    // gen_ref is already captured at function start
+    MandelbrotRenderer* self = this;
+    unsigned char* pixels_data_captured = pixels_.data();  // Capture pointer once, at creation time
+    ThreadPool* thread_pool_ptr = &thread_pool_;           // Capture pointer to thread pool
+    const ColorScheme& palette_captured = ColorScheme::get_instance();
+    auto fast_process_pixel =
+        [self, pixels_data_captured, pixels_size, pixel_to_x, pixel_to_y, x_min_coord, y_min_coord, max_iter, &palette_captured, width_4, width, height, start_generation, gen_ref](
+            int32_t x_pos, int32_t y_pos) -> int
     {
+        // Use captured pixels_data pointer - no need to access self->pixels_.data() again
+        // This avoids the crash if self becomes invalid
+        unsigned char* pixels_data = pixels_data_captured;
+        if (pixels_data == nullptr || pixels_size < 4)
+        {
+            return max_iter;
+        }
+
         FloatType cx = x_min_coord + pixel_to_x * x_pos;
         FloatType cy = y_min_coord + pixel_to_y * y_pos;
 
         FloatType zr = static_cast<FloatType>(0.0);
         FloatType zi = static_cast<FloatType>(0.0);
         int iter = max_iter;
+        constexpr FloatType escape_radius_sq = static_cast<FloatType>(4.0);
 
         for (int i = 0; i < max_iter; ++i)
         {
@@ -251,12 +322,85 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
             zi = zi_new;
         }
 
-        const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette_.palette[static_cast<size_t>(iter) % palette_size];
-        int idx = y_pos * width_4 + x_pos * 4;  // Use precomputed width_4
-        pixels_[idx + 0] = color[0];
-        pixels_[idx + 1] = color[1];
-        pixels_[idx + 2] = color[2];
-        // Alpha channel (idx + 3) already 255, no need to set
+        const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette_captured.palette[static_cast<size_t>(iter) % palette_captured.palette.size()];
+
+        // Calculate index with bounds checking
+        if (x_pos < 0 || y_pos < 0 || x_pos >= width || y_pos >= height)
+        {
+            return iter;  // Out of bounds, return without writing
+        }
+
+        // Check generation again before writing - if a new render started, bail out
+        unsigned int current_gen = gen_ref->load();
+        if (start_generation != current_gen)
+        {
+            return iter;  // Stale render, exit early
+        }
+
+        // Use the captured pixels_data - no need to re-access through self
+        // This avoids the crash if self becomes invalid
+        // The pixels_data was captured when the lambda was created, so it's safe to use
+        if (pixels_data == nullptr || pixels_size < 4)
+        {
+            return iter;  // Buffer invalid or too small, cannot write
+        }
+
+        // Calculate index using size_t arithmetic to prevent overflow
+        // width_4 is already size_t, so this calculation is safe
+        // y_pos and x_pos are already validated to be within [0, width) and [0, height)
+        size_t idx = static_cast<size_t>(y_pos) * width_4 + static_cast<size_t>(x_pos) * 4;
+
+        // Bounds check: ensure we can write 4 bytes (idx through idx+3)
+        // Calculate maximum safe index: pixels_size - 4 (to leave room for 4 bytes)
+        // We already checked pixels_size >= 4 above, so this is safe
+        const size_t max_safe_idx = pixels_size - 4;
+        if (idx <= max_safe_idx)
+        {
+            // Final generation check RIGHT before write - buffer might have been invalidated
+            // This is the last chance to bail out before accessing potentially invalid memory
+            unsigned int final_gen_check = gen_ref->load(std::memory_order_acquire);
+            if (start_generation != final_gen_check)
+            {
+                return iter;  // Stale render, exit immediately
+            }
+
+            // Double-check pointer validity (defensive programming)
+            if (pixels_data == nullptr)
+            {
+                return iter;  // Buffer invalidated, exit immediately
+            }
+
+            // Final bounds check: ensure idx + 3 is within bounds
+            // This is redundant but provides extra safety
+            if ((idx + 3) < pixels_size)
+            {
+                // Write pixel directly - all checks passed, safe to write
+                // UI doesn't block on pixel writes; generation check bails out stale renders
+                if (pixels_data == nullptr)
+                {
+                    DEBUG_PRINTF("[ERROR] Writing pixel: pixels_data is null! renderer=%p, idx=%zu\n", static_cast<void*>(self), idx);
+                    return iter;
+                }
+                // Write pixel - pixels_data was captured at lambda creation time, so it's safe
+                pixels_data[idx + 0] = color[0];
+                pixels_data[idx + 1] = color[1];
+                pixels_data[idx + 2] = color[2];
+                // Alpha channel (idx + 3) already 255, no need to set
+#ifdef _DEBUG
+                // Debug: log first few pixels to verify writes
+                static int pixel_write_count = 0;
+                if (pixel_write_count < 10)
+                {
+                    DEBUG_PRINTF("[RENDERER] Wrote pixel at (%d, %d): RGB=(%u, %u, %u), idx=%zu\n", x_pos, y_pos, color[0], color[1], color[2], idx);
+                    pixel_write_count++;
+                }
+#endif
+            }
+            else
+            {
+                DEBUG_PRINTF("[ERROR] Bounds check failed: idx=%zu, pixels_size=%zu, renderer=%p\n", idx, pixels_size, static_cast<void*>(self));
+            }
+        }
 
         return iter;
     };
@@ -301,12 +445,7 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
         }
     }
 
-    // Notify render callback after drawing boundaries (for progressive visualization)
-    // Only if this render is still current (not superseded)
-    if (generation == render_generation_.load() && render_callback_ && !pixels_.empty())
-    {
-        render_callback_->on_pixels_updated(pixels_.data(), width_, height_);
-    }
+    // No callback needed - renderer writes directly to canvas buffer
 
     int inner_d_x = x_max - x_min - 1;
     int inner_d_y = y_max - y_min - 1;
@@ -334,7 +473,7 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
             }
         }
 
-        if (!all_same && thread_pool && thread_pool->is_paused())
+        if (!all_same && thread_pool_ptr->is_paused())
         {
            all_same = true; // we are terminating the recursion, flood fill.
         }
@@ -342,13 +481,22 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
         if (all_same)
         {
             // Flood fill entire interior - optimized using first row as pattern
-            const ColorScheme::Color& color = first_iter == max_iter ? ColorScheme::black : palette_.palette[static_cast<size_t>(first_iter) % palette_size];
+            // No mutex needed - generation check already done, UI doesn't block on writes
+            const ColorScheme& palette = ColorScheme::get_instance();
+            const ColorScheme::Color& color = first_iter == max_iter ? ColorScheme::black : palette.palette[static_cast<size_t>(first_iter) % palette.palette.size()];
             const size_t fill_width = static_cast<size_t>(new_x_max - new_x_min + 1);
             const size_t fill_bytes = fill_width * 4;
 
             // Fill first row efficiently - construct pattern once, then duplicate
             // Alpha channel already 255 from buffer initialization, but we'll include it for memcpy
-            unsigned char* first_row_start = &pixels_[new_y_min * width_4 + new_x_min * 4];
+            // Calculate offset using size_t arithmetic to prevent overflow
+            // Access pixels_ directly (we're in a member function, so this is safe)
+            size_t first_row_offset = static_cast<size_t>(new_y_min) * width_4 + static_cast<size_t>(new_x_min) * 4;
+            if (first_row_offset + fill_bytes > pixels_size)
+            {
+                return;  // Bounds check failed, exit early
+            }
+            unsigned char* first_row_start = pixels_.data() + first_row_offset;
 
             // Write first pixel completely (RGB + alpha) as the pattern
             first_row_start[0] = color[0];
@@ -367,321 +515,135 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
             // Copy first row to all subsequent rows using memcpy (very fast)
             for (int32_t y_pos = new_y_min + 1; y_pos <= new_y_max; ++y_pos)
             {
-                unsigned char* row_start = &pixels_[y_pos * width_4 + new_x_min * 4];
+                // Calculate offset using size_t arithmetic to prevent overflow
+                // Access pixels_ directly (we're in a member function, so this is safe)
+                size_t row_offset = static_cast<size_t>(y_pos) * width_4 + static_cast<size_t>(new_x_min) * 4;
+                if (row_offset + fill_bytes > pixels_size)
+                {
+                    break;  // Bounds check failed, stop copying
+                }
+                unsigned char* row_start = pixels_.data() + row_offset;
                 std::memcpy(row_start, first_row_start, fill_bytes);
             }
 
-            // Notify render callback after flood fill (for progressive visualization)
-            if (generation == render_generation_.load() && render_callback_ && !pixels_.empty())
-            {
-                render_callback_->on_pixels_updated(pixels_.data(), width_, height_);
-            }
+            // No callback needed - renderer writes directly to canvas buffer
         }
         else
         {
             constexpr int recurse_size_limit = 4;
             if (inner_d_x <= recurse_size_limit || inner_d_y <= recurse_size_limit)
             {
-                generate_mandelbrot_direct(new_x_min, new_x_max, new_y_min, new_y_max);
+                unsigned int current_gen_check_direct = current_generation_ref_->load();
+                generate_mandelbrot_direct(new_x_min, new_x_max, new_y_min, new_y_max, start_generation, current_gen_check_direct);
 
-                // Notify render callback after direct generation (for progressive visualization)
-                if (generation == render_generation_.load() && render_callback_ && !pixels_.empty())
-                {
-                    render_callback_->on_pixels_updated(pixels_.data(), width_, height_);
-                }
+                // No callback needed - renderer writes directly to canvas buffer
             }
             else
             {
                 int x_mid = (new_x_min + new_x_max) / 2;
                 int y_mid = (new_y_min + new_y_max) / 2;
-                
-                if (thread_pool == nullptr)
+
+                // Submit using thread pool
+                // Worker ensures renderer outlives all tasks by waiting for completion
+                // CRITICAL: Capture gen_ref and thread_pool pointers to avoid accessing self members after renderer might be destroyed
+                // CRITICAL: Check generation before adding tasks to avoid adding tasks for cancelled renders
+                // Use captured gen_ref instead of accessing current_generation_ref_ directly
+                unsigned int current_gen_before_add = gen_ref->load();
+                if (start_generation != current_gen_before_add)
                 {
-                    // Direct recursive calls (synchronous)
-                    generate_mandelbrot_recurse(new_x_min, x_mid, new_y_min, y_mid, nullptr, generation);
-                    generate_mandelbrot_recurse(x_mid + 1, new_x_max, new_y_min, y_mid, nullptr, generation);
-                    generate_mandelbrot_recurse(new_x_min, x_mid, y_mid + 1, new_y_max, nullptr, generation);
-                    generate_mandelbrot_recurse(x_mid + 1, new_x_max, y_mid + 1, new_y_max, nullptr, generation);
+                    DEBUG_PRINTF("[RENDERER] Skipping recursive tasks: render cancelled (start_gen=%u != current_gen=%u)\n", start_generation, current_gen_before_add);
+                    return;  // Render was cancelled, don't add more tasks
                 }
-                else
-                {
-                    // Submit using provided thread pool
-                    MandelbrotRenderer* self = this;
-                    thread_pool->add_task([=]() {
-                        self->generate_mandelbrot_recurse(new_x_min, x_mid, new_y_min, y_mid, thread_pool, generation);
+
+                MandelbrotRenderer* self = this;
+                std::atomic<unsigned int>* gen_ref = current_generation_ref_;
+                ThreadPool* thread_pool_ptr = &thread_pool_;  // Capture pointer to thread pool
+                DEBUG_PRINTF("[RENDERER] Adding 4 recursive tasks: renderer=%p\n", static_cast<void*>(self));
+                thread_pool_ptr->add_task(
+                    [self, gen_ref, new_x_min, x_mid, new_y_min, y_mid, start_generation]()
+                    {
+                        DEBUG_PRINTF("[TASK] Recursive task 1 started: renderer=%p\n", static_cast<void*>(self));
+                        unsigned int current = gen_ref->load();
+                        if (start_generation == current)
+                        {
+                            self->generate_mandelbrot_recurse(new_x_min, x_mid, new_y_min, y_mid, start_generation, current);
+                        }
+                        DEBUG_PRINTF("[TASK] Recursive task 1 completed: renderer=%p\n", static_cast<void*>(self));
                     });
-                    thread_pool->add_task([=]() {
-                        self->generate_mandelbrot_recurse(x_mid + 1, new_x_max, new_y_min, y_mid, thread_pool, generation);
+                thread_pool_ptr->add_task(
+                    [self, gen_ref, x_mid, new_x_max, new_y_min, y_mid, start_generation]()
+                    {
+                        DEBUG_PRINTF("[TASK] Recursive task 2 started: renderer=%p\n", static_cast<void*>(self));
+                        unsigned int current = gen_ref->load();
+                        if (start_generation == current)
+                        {
+                            self->generate_mandelbrot_recurse(x_mid + 1, new_x_max, new_y_min, y_mid, start_generation, current);
+                        }
+                        DEBUG_PRINTF("[TASK] Recursive task 2 completed: renderer=%p\n", static_cast<void*>(self));
                     });
-                    thread_pool->add_task([=]() {
-                        self->generate_mandelbrot_recurse(new_x_min, x_mid, y_mid + 1, new_y_max, thread_pool, generation);
+                thread_pool_ptr->add_task(
+                    [self, gen_ref, new_x_min, x_mid, y_mid, new_y_max, start_generation]()
+                    {
+                        DEBUG_PRINTF("[TASK] Recursive task 3 started: renderer=%p\n", static_cast<void*>(self));
+                        unsigned int current = gen_ref->load();
+                        if (start_generation == current)
+                        {
+                            self->generate_mandelbrot_recurse(new_x_min, x_mid, y_mid + 1, new_y_max, start_generation, current);
+                        }
+                        DEBUG_PRINTF("[TASK] Recursive task 3 completed: renderer=%p\n", static_cast<void*>(self));
                     });
-                    thread_pool->add_task([=]() {
-                        self->generate_mandelbrot_recurse(x_mid + 1, new_x_max, y_mid + 1, new_y_max, thread_pool, generation);
+                thread_pool_ptr->add_task(
+                    [self, gen_ref, x_mid, new_x_max, y_mid, new_y_max, start_generation]()
+                    {
+                        DEBUG_PRINTF("[TASK] Recursive task 4 started: renderer=%p\n", static_cast<void*>(self));
+                        unsigned int current = gen_ref->load();
+                        if (start_generation == current)
+                        {
+                            self->generate_mandelbrot_recurse(x_mid + 1, new_x_max, y_mid + 1, new_y_max, start_generation, current);
+                        }
+                        DEBUG_PRINTF("[TASK] Recursive task 4 completed: renderer=%p\n", static_cast<void*>(self));
                     });
-                }
             }
         }
     }
-    
-    // Notify render callback that pixels have been updated (only if still current generation)
-    if (generation == render_generation_.load() && render_callback_ && !pixels_.empty())
-    {
-        render_callback_->on_pixels_updated(pixels_.data(), width_, height_);
-    }
+
+    // No callback needed - renderer writes directly to canvas buffer
 }
 
-void MandelbrotRenderer::generate_mandelbrot(ThreadPool* thread_pool)
+void MandelbrotRenderer::generate_mandelbrot(unsigned int start_generation, unsigned int /*current_generation*/)
 {
-    // Increment generation to mark this as a new render
-    unsigned int generation = ++render_generation_;
-
     // Update metrics
     metrics_ = CanvasMetrics(width_, height_, x_min_, x_max_, y_min_, y_max_);
 
-    // Resize pixel buffer if needed, but DON'T clear existing pixels
+    DEBUG_PRINTF("[RENDERER] generate_mandelbrot: width=%d, height=%d, pixels_.size()=%zu\n", width_, height_, pixels_.size());
+
+    // Note: Canvas buffer is managed by MandelWorker, not here
     // Per RENDERING.md: zoom should render OVER existing image, not clear first
     // This provides visual continuity - old image stays visible while new one renders
-    size_t pixel_count = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 4;
-    size_t old_size = pixels_.size();
-    pixels_.resize(pixel_count);
-    
-    // Only initialize NEW pixels (if buffer grew) - set alpha to 255
-    if (pixel_count > old_size)
-    {
-        // Initialize new portion to black with alpha=255
-        for (size_t i = old_size; i < pixel_count; i += 4)
+
+    // Resume thread pool
+    thread_pool_.resume();
+
+    // Use thread pool for parallel generation
+    // Worker ensures renderer outlives all tasks by waiting for completion
+    // CRITICAL: Capture gen_ref and thread_pool pointers to avoid accessing self members after renderer might be destroyed
+    MandelbrotRenderer* self = this;
+    std::atomic<unsigned int>* gen_ref = current_generation_ref_;
+    ThreadPool* thread_pool_ptr = &thread_pool_;  // Capture pointer to thread pool
+    int width = width_;
+    int height = height_;
+    DEBUG_PRINTF("[RENDERER] Adding initial task: renderer=%p, start_gen=%u\n", static_cast<void*>(self), start_generation);
+    thread_pool_ptr->add_task(
+        [self, gen_ref, start_generation, width, height]()
         {
-            pixels_[i] = 0;      // R
-            pixels_[i + 1] = 0;  // G
-            pixels_[i + 2] = 0;  // B
-            pixels_[i + 3] = 255; // A
-        }
-    }
-
-    if (thread_pool == nullptr)
-    {
-        // Direct recursive calls (synchronous)
-        generate_mandelbrot_recurse(0, width_ - 1, 0, height_ - 1, nullptr, generation);
-    }
-    else
-    {
-        // Use thread pool (start if it was reset above, or if it's not running)
-        MandelbrotRenderer* self = this;
-        thread_pool->add_task([=]() { self->generate_mandelbrot_recurse(0, width_ - 1, 0, height_ - 1, thread_pool, generation); });
-    }
-}
-
-void MandelbrotRenderer::regenerate(ThreadPool* thread_pool, int pan_dx, int pan_dy)
-{
-    // Check if we're panning (non-zero pixel offsets)
-    bool is_panning = (pan_dx != 0 || pan_dy != 0);
-
-    if (thread_pool != nullptr)
-    {
-        thread_pool->resume();
-    }
-
-    if (is_panning && !pixels_.empty() && width_ > 0 && height_ > 0)
-    {
-        // Panning: shift existing pixels and regenerate only exposed regions
-        // Clamp pan offsets to valid range
-        pan_dx = std::clamp(pan_dx, -width_ + 1, width_ - 1);
-        pan_dy = std::clamp(pan_dy, -height_ + 1, height_ - 1);
-
-        if (pan_dx != 0 || pan_dy != 0)
-        {
-            // Update metrics first (bounds have changed)
-            metrics_ = CanvasMetrics(width_, height_, x_min_, x_max_, y_min_, y_max_);
-
-            // Shift pixels using memmove
-            // For positive pan_dx: shift right (new data on left)
-            // For negative pan_dx: shift left (new data on right)
-            // Similar for pan_dy
-
-            if (pan_dx != 0 && pan_dy != 0)
+            DEBUG_PRINTF("[TASK] Initial task started: renderer=%p, start_gen=%u\n", static_cast<void*>(self), start_generation);
+            unsigned int current = gen_ref->load();
+            if (start_generation == current)
             {
-                // Both X and Y panning: use full copy to avoid overwriting issues
-                // Copy from source region to destination region with offset
-                std::vector<unsigned char> temp_buffer(pixels_);
-
-                // Calculate source and destination regions
-                int src_x_min, dst_x_min, copy_width;
-                int src_y_min, dst_y_min, copy_height;
-
-                if (pan_dx > 0)
-                {
-                    // Shift right: source is left part, destination is right part
-                    src_x_min = 0;
-                    dst_x_min = pan_dx;
-                    copy_width = width_ - pan_dx;
-                }
-                else
-                {
-                    // Shift left: source is right part, destination is left part
-                    int abs_dx = -pan_dx;
-                    src_x_min = abs_dx;
-                    dst_x_min = 0;
-                    copy_width = width_ - abs_dx;
-                }
-
-                if (pan_dy > 0)
-                {
-                    // Shift down: source is top part, destination is bottom part
-                    src_y_min = 0;
-                    dst_y_min = pan_dy;
-                    copy_height = height_ - pan_dy;
-                }
-                else
-                {
-                    // Shift up: source is bottom part, destination is top part
-                    int abs_dy = -pan_dy;
-                    src_y_min = abs_dy;
-                    dst_y_min = 0;
-                    copy_height = height_ - abs_dy;
-                }
-
-                // Copy overlapping region from source to destination
-                for (int y = 0; y < copy_height; ++y)
-                {
-                    int src_y = src_y_min + y;
-                    int dst_y = dst_y_min + y;
-                    if (dst_y >= 0 && dst_y < height_ && src_y >= 0 && src_y < height_)
-                    {
-                        std::memcpy(&pixels_[dst_y * width_ * 4 + dst_x_min * 4], &temp_buffer[src_y * width_ * 4 + src_x_min * 4], static_cast<size_t>(copy_width) * 4);
-                    }
-                }
+                self->generate_mandelbrot_recurse(0, width - 1, 0, height - 1, start_generation, current);
             }
-            else if (pan_dy != 0)
-            {
-                // Only vertical panning
-                if (pan_dy > 0)
-                {
-                    // Shift rows down (new data on top)
-                    for (int y = height_ - 1; y >= pan_dy; --y)
-                    {
-                        std::memmove(&pixels_[y * width_ * 4], &pixels_[(y - pan_dy) * width_ * 4], static_cast<size_t>(width_) * 4);
-                    }
-                }
-                else
-                {
-                    // Shift rows up (new data on bottom)
-                    int abs_dy = -pan_dy;
-                    for (int y = 0; y < height_ - abs_dy; ++y)
-                    {
-                        std::memmove(&pixels_[y * width_ * 4], &pixels_[(y + abs_dy) * width_ * 4], static_cast<size_t>(width_) * 4);
-                    }
-                }
-            }
-            else if (pan_dx != 0)
-            {
-                // Only horizontal panning
-                for (int y = 0; y < height_; ++y)
-                {
-                    unsigned char* row_start = &pixels_[y * width_ * 4];
-                    if (pan_dx > 0)
-                    {
-                        // Shift right (new data on left)
-                        std::memmove(row_start + static_cast<size_t>(pan_dx) * 4, row_start, static_cast<size_t>(width_ - pan_dx) * 4);
-                    }
-                    else
-                    {
-                        // Shift left (new data on right)
-                        int abs_dx = -pan_dx;
-                        std::memmove(row_start, row_start + static_cast<size_t>(abs_dx) * 4, static_cast<size_t>(width_ - abs_dx) * 4);
-                    }
-                }
-            }
-
-            // Determine which regions need to be regenerated
-            int32_t x_min_new = 0, x_max_new = width_ - 1;
-            int32_t y_min_new = 0, y_max_new = height_ - 1;
-
-            if (pan_dx > 0)
-            {
-                // Shifted right, regenerate left edge
-                x_min_new = 0;
-                x_max_new = pan_dx - 1;
-            }
-            else if (pan_dx < 0)
-            {
-                // Shifted left, regenerate right edge
-                x_min_new = width_ + pan_dx;
-                x_max_new = width_ - 1;
-            }
-
-            if (pan_dy > 0)
-            {
-                // Shifted down, regenerate top edge
-                y_min_new = 0;
-                y_max_new = pan_dy - 1;
-            }
-            else if (pan_dy < 0)
-            {
-                // Shifted up, regenerate bottom edge
-                y_min_new = height_ + pan_dy;
-                y_max_new = height_ - 1;
-            }
-
-            // Increment generation to mark this as a new render
-            unsigned int generation = ++render_generation_;
-
-            // Regenerate the exposed regions
-            if (pan_dx != 0 && pan_dy != 0)
-            {
-                // Two regions to regenerate (L-shaped or cross-shaped)
-                // Top/bottom strip + left/right strip
-                if (pan_dy > 0)
-                {
-                    // Top strip
-                    generate_mandelbrot_recurse(0, width_ - 1, 0, pan_dy - 1, thread_pool, generation);
-                }
-                else
-                {
-                    // Bottom strip
-                    int abs_dy = -pan_dy;
-                    generate_mandelbrot_recurse(0, width_ - 1, height_ - abs_dy, height_ - 1, thread_pool, generation);
-                }
-
-                if (pan_dx > 0)
-                {
-                    // Left strip (excluding the part already regenerated)
-                    generate_mandelbrot_recurse(0, pan_dx - 1, pan_dy > 0 ? pan_dy : 0, pan_dy < 0 ? height_ + pan_dy - 1 : height_ - 1, thread_pool, generation);
-                }
-                else
-                {
-                    // Right strip (excluding the part already regenerated)
-                    int abs_dx = -pan_dx;
-                    generate_mandelbrot_recurse(width_ - abs_dx, width_ - 1, pan_dy > 0 ? pan_dy : 0, pan_dy < 0 ? height_ + pan_dy - 1 : height_ - 1, thread_pool, generation);
-                }
-            }
-            else if (pan_dy != 0)
-            {
-                // Single vertical strip
-                generate_mandelbrot_recurse(0, width_ - 1, y_min_new, y_max_new, thread_pool, generation);
-            }
-            else
-            {
-                // Single horizontal strip
-                generate_mandelbrot_recurse(x_min_new, x_max_new, 0, height_ - 1, thread_pool, generation);
-            }
-        }
-        else
-        {
-            // No actual panning, regenerate everything
-            generate_mandelbrot(thread_pool);
-        }
-    }
-    else
-    {
-        // Not panning, regenerate everything
-        generate_mandelbrot(thread_pool);
-    }
-
-    // Note: We intentionally do NOT pause the thread pool here.
-    // This allows progressive rendering to work - the main loop can update
-    // the display while worker threads continue processing.
-    // The pool will naturally become idle when all tasks complete.
+            DEBUG_PRINTF("[TASK] Initial task completed: renderer=%p\n", static_cast<void*>(self));
+        });
 }
 
 }  // namespace mandel

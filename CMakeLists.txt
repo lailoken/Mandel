@@ -10,7 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Configure build types for optimal debugging and performance
 if(MSVC)
     # MSVC compiler flags
-    set(CMAKE_CXX_FLAGS_DEBUG "/MDd /Zi /Od /RTC1")
+    set(CMAKE_CXX_FLAGS_DEBUG "/MDd /Zi /Od /RTC1 /D_DEBUG /DDEBUG")
     set(CMAKE_CXX_FLAGS_RELEASE "/MD /O2 /Ob2 /DNDEBUG")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/MD /O2 /Ob2 /Zi /DNDEBUG")
     set(CMAKE_CXX_FLAGS_MINSIZEREL "/MD /O1 /Ob1 /DNDEBUG")
@@ -19,7 +19,7 @@ if(MSVC)
 else()
     # GCC/Clang compiler flags
     # Debug: debuggable with symbols, no optimizations
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra")
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -D_DEBUG -DDEBUG")
     
     # Release: maximum optimizations for speed
     # Start with -O3 for maximum standard optimizations
@@ -153,6 +153,11 @@ list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/mandel_test.cpp")
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES} ${IMGUI_SOURCES})
 
+# Define _DEBUG for debug builds
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Debug>:_DEBUG>
+)
+
 # Enable interprocedural optimization (LTO) for Release builds
 # This enables link-time optimizations when building in Release mode
 set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
@@ -281,7 +286,10 @@ if(UNIT_TEST)
         ${imgui_SOURCE_DIR}
         ${imgui_SOURCE_DIR}/backends
     )
-    target_compile_definitions(${PROJECT_NAME}_test PRIVATE UNIT_TEST)
+    target_compile_definitions(${PROJECT_NAME}_test PRIVATE 
+        UNIT_TEST
+        $<$<CONFIG:Debug>:_DEBUG>
+    )
     target_link_libraries(${PROJECT_NAME}_test PRIVATE pthread)
     
     # Test doesn't need SDL/OpenGL/ImGui, but if we want to test without them,
@@ -290,3 +298,70 @@ if(UNIT_TEST)
     message(STATUS "Test executable ${PROJECT_NAME}_test will be created")
 endif()
 
+# Add unit test executables (always available, not just in UNIT_TEST mode)
+add_executable(test_mandel_renderer
+    test_mandel_renderer.cpp
+    src/mandel.cpp
+    src/thread_pool.cpp
+)
+target_include_directories(test_mandel_renderer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_compile_definitions(test_mandel_renderer PRIVATE
+    $<$<CONFIG:Debug>:_DEBUG>
+)
+target_link_libraries(test_mandel_renderer PRIVATE pthread)
+
+add_executable(test_mandel_worker
+    test_mandel_worker.cpp
+    src/mandel.cpp
+    src/mandel_worker.cpp
+    src/thread_pool.cpp
+)
+target_include_directories(test_mandel_worker PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_compile_definitions(test_mandel_worker PRIVATE
+    $<$<CONFIG:Debug>:_DEBUG>
+)
+target_link_libraries(test_mandel_worker PRIVATE pthread)
+
+add_executable(test_translation_swap
+    test_translation_swap.cpp
+    mandel_ui_test.cpp
+    src/overscan_viewport.cpp
+    src/mandel_ui.cpp
+    src/mandel_worker.cpp
+    src/mandel.cpp
+    src/thread_pool.cpp
+    src/config.cpp
+    src/mandel_control.cpp
+    ${IMGUI_SOURCES}
+)
+target_include_directories(test_translation_swap PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+    ${SDL2_INCLUDE_DIRS}
+)
+# Link nlohmann/json (header-only, but provides include directories)
+if(TARGET nlohmann_json::nlohmann_json)
+    target_link_libraries(test_translation_swap PRIVATE nlohmann_json::nlohmann_json)
+elseif(TARGET nlohmann_json)
+    target_link_libraries(test_translation_swap PRIVATE nlohmann_json)
+elseif(EXISTS "${json_SOURCE_DIR}/include/nlohmann/json.hpp")
+    target_include_directories(test_translation_swap PRIVATE "${json_SOURCE_DIR}/include")
+elseif(EXISTS "${json_SOURCE_DIR}/single_include/nlohmann/json.hpp")
+    target_include_directories(test_translation_swap PRIVATE "${json_SOURCE_DIR}/single_include")
+endif()
+# Link SDL2 for test (needed by ImGui backend)
+if(TARGET SDL2::SDL2)
+    target_link_libraries(test_translation_swap PRIVATE SDL2::SDL2)
+else()
+    target_link_libraries(test_translation_swap PRIVATE ${SDL2_LIBRARIES})
+endif()
+target_link_libraries(test_translation_swap PRIVATE pthread ${OPENGL_LIBRARIES})
+target_compile_definitions(test_translation_swap PRIVATE
+    $<$<CONFIG:Debug>:_DEBUG>
+)
+target_link_libraries(test_translation_swap PRIVATE pthread)

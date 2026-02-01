@@ -1,9 +1,16 @@
 #include "config.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
+
+#ifdef _DEBUG
+#define DEBUG_PRINTF(...) printf(__VA_ARGS__)
+#else
+#define DEBUG_PRINTF(...) ((void)0)
+#endif
 
 namespace mandel
 {
@@ -34,12 +41,16 @@ namespace detail
     {
         if (j.is_string())
         {
-            return std::strtold(j.get<std::string>().c_str(), nullptr);
+            FloatType result = std::strtold(j.get<std::string>().c_str(), nullptr);
+            DEBUG_PRINTF("[CONFIG] float_from_json: string='%s' -> %.20Lf\n", j.get<std::string>().c_str(), result);
+            return result;
         }
         else
         {
             // Old format: stored as number (backward compatibility)
-            return static_cast<FloatType>(j.get<double>());
+            FloatType result = static_cast<FloatType>(j.get<double>());
+            DEBUG_PRINTF("[CONFIG] float_from_json: number=%.20Lf\n", result);
+            return result;
         }
     }
 
@@ -129,11 +140,29 @@ LoadedViews load_views_from_file()
 
         if (json_data.contains("current_view"))
         {
+            DEBUG_PRINTF("[CONFIG] Found current_view in JSON, parsing...\n");
             if (auto state = detail::view_state_from_json(json_data["current_view"]))
             {
                 result.current_view = *state;
                 result.has_current_view = true;
+                DEBUG_PRINTF("[CONFIG] Loaded current_view: x_min=%.20Lf, x_max=%.20Lf, y_min=%.20Lf, y_max=%.20Lf, max_iter=%d\n",
+                       result.current_view.x_min, result.current_view.x_max,
+                       result.current_view.y_min, result.current_view.y_max,
+                       result.current_view.max_iterations);
+                DEBUG_PRINTF("[CONFIG] Validation: x_min < x_max = %d (diff=%.20Lf), y_min < y_max = %d (diff=%.20Lf)\n",
+                       (result.current_view.x_min < result.current_view.x_max) ? 1 : 0,
+                       result.current_view.x_max - result.current_view.x_min,
+                       (result.current_view.y_min < result.current_view.y_max) ? 1 : 0,
+                       result.current_view.y_max - result.current_view.y_min);
             }
+            else
+            {
+                DEBUG_PRINTF("[CONFIG] WARNING: current_view exists but failed to parse\n");
+            }
+        }
+        else
+        {
+            DEBUG_PRINTF("[CONFIG] No current_view in config file\n");
         }
     }
     catch (const std::exception&)

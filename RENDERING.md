@@ -3,195 +3,152 @@
 ## Design Goals
 
 1. **Buttery smooth interaction** - Dragging and zooming feel instant
-2. **Progressive refinement** - See results as computed (when idle)
+2. **Progressive refinement** - Early bail when user interaction while rendering
 3. **No visual glitches** - No tearing, flickering, or jarring transitions
-4. **Simplify** - Keep this document simple and concise, and the code even simpler and as small as possible.
+4. **Thread Safety** - No race conditions, no dangling pointers, no memory corruption
+
+---
+
+## System Overview
+
+The system renders the Mandelbrot set with smooth, responsive interaction. Users can drag to pan and scroll to zoom. The point under the mouse cursor must remain fixed in Mandelbrot coordinate space throughout all interactions, even when buffers swap.
+
+### Key Behaviors
+
+- **Dragging**: Image follows mouse smoothly, no jumps or stutters
+- **Zooming**: Image zooms in/out centered on mouse position
+- **Continuous rendering**: Worker always has next frame rendering in background
+- **Coordinate preservation**: Mouse coordinate in Mandelbrot space never jumps during buffer swaps
 
 ---
 
 ## Components
 
-### MandelbrotRenderer (`mandel.hpp/cpp`)
-- Owns CPU pixel buffer (`std::vector<unsigned char> pixels_`)
-- Handles Mandelbrot calculation with recursive boundary-tracing + flood fill
-- Manages `ThreadPool` for parallel computation
-- Tracks complex plane bounds and zoom level
-- Uses `long double` for 10^15× zoom precision
+### Renderer
+- Calculates Mandelbrot set using recursive boundary-tracing + flood fill
+- Uses high-precision floating point for deep zoom support
+- Parallelizes computation across multiple threads
+- Creates and owns its own pixel buffer
+- Can be cancelled mid-render (generation check)
+- Provides completed buffer to worker when done
 
-### ImGuiRenderer (`mandel_render.hpp/cpp`)
-- Owns two GPU textures: `texture_front_` (displayed), `texture_back_` (upload target)
+### Worker
+- Owns main canvas buffer
+- Creates renderer instances for each render
+- Waits for renderer completion, then merges renderer's buffer into canvas
+- Thread-safe merge operation (only one merge at a time)
+
+### Viewport Manager
+- Manages viewport (visible area) and canvas (viewport + overscan)
+- Calculates overscan margins (~1/6 viewport on each side)
+- Converts between viewport bounds and canvas bounds
+- Calculates texture coordinates and drawing parameters
+- Handles display offset for smooth dragging
+- Detects when dragging past overscan (shows grey areas)
+
+### UI Controller
+- Manages double-buffered GPU textures (front/back)
 - Handles user input (drag, zoom, double-click)
-- Manages visual offset/scale for responsive interaction
-- Manages overscan buffer (~1/6 viewport on each side) to support smooth panning/zooming
+- Manages display offset for smooth interaction
+- Coordinates rendering and buffer swaps
+- Ensures mouse coordinate preservation during swaps
 
 ---
 
-## Double-Buffered Textures
+## Double-Buffered Rendering
 
 ```
-MandelbrotRenderer::pixels_  →  upload to texture_back_
-                                      ↓
-                              std::swap(front, back)
-                                      ↓
-                              draw texture_front_ (with margin offset)
+Renderer completes → Worker merges → Upload to back texture → Swap to front → Display
 ```
 
-Never modify the displayed texture. Upload to back, swap to front.
+Never modify displayed texture directly. Always update back texture, then swap to front.
 
 ---
 
 ## Overscan
 
-To improve panning and zooming experience, we render a larger area than visible on screen.
+To enable smooth panning without immediate re-rendering, render a larger area than visible.
 
-*   **Viewport**: The actual screen area (e.g., 800×600)
-*   **Overscan Margin**: ~1/6 of viewport on each side (`(viewport + 5) / 6`)
-*   **Render Buffer**: Viewport + 2 × Margin (e.g., for 800×600: margin=134, buffer=1068×868)
+- **Viewport**: Visible screen area
+- **Overscan Margin**: ~1/6 of viewport on each side
+- **Canvas**: Viewport + 2× margin on each side
 
-The texture is drawn offset by `-margin` so the viewport aligns with the center of the render buffer.
+### Drawing Past Overscan
 
-### Implementation Details
-```cpp
-// Calculate margins (~1/6 viewport, rounded up)
-margin_x_ = (viewport_width_ + 5) / 6;
-margin_y_ = (viewport_height_ + 5) / 6;
-
-// Buffer dimensions
-width_ = viewport_width_ + 2 * margin_x_;
-height_ = viewport_height_ + 2 * margin_y_;
-
-// Drawing position (margin offset scales with zoom)
-float margin_offset_x = margin_x_ * display_scale_;
-ImVec2 image_min(scale_offset_x + display_offset_x_ - margin_offset_x, ...);
-
-// Screen to buffer pixel conversion
-float pixel_x = mouse_x + margin_x_;  // screen(0,0) → buffer(margin,margin)
-```
-
-### Bounds Conversion
-- **Buffer bounds**: What renderer stores (includes overscan)
-- **Viewport bounds**: What user sees/saves (center portion of buffer)
-```cpp
-// Viewport → Buffer: extend by margin in complex coords
-pixel_to_x = viewport_range / viewport_width;
-buffer_x_min = viewport_x_min - pixel_to_x * margin_x_;
-
-// Buffer → Viewport: shrink by margin in complex coords
-viewport_x_min = buffer_x_min + pixel_to_x * margin_x_;
-```
+When dragging past overscan bounds:
+- Show grey background in areas without valid texture data
+- Clamp texture coordinates to valid range
+- Adjust texture size and position to show valid area correctly
 
 ---
 
-## Panning
+## Dragging
 
-### State
-```cpp
-float display_offset_x_, display_offset_y_;           // Visual offset (screen coords)
-float render_start_offset_x_, render_start_offset_y_; // Snapshot when render starts
-bool suppress_texture_updates_;                        // Skip uploads during interaction
-```
+### Behavior
 
-### Flow
-1. **Mouse drags** → `display_offset_ += mouse_delta` (instant visual shift)
-2. **Offset exceeds threshold** →
-   - `render_start_offset_ = display_offset_` (snapshot)
-   - `suppress_texture_updates_ = true`
-   - Calculate new bounds: `pan = -(display_offset_ - render_start_offset_) * screen_to_complex`
-   - Start render
-3. **During render** → Old texture shown at `display_offset_` (user can keep dragging)
-4. **Render completes** →
-   - Upload to back, swap to front
-   - `display_offset_ -= render_start_offset_` (preserve extra drag)
-   - `render_start_offset_ = 0`
-   - `suppress_texture_updates_ = false`
+1. **Accumulate offset**: As user drags, accumulate display offset (mouse movement)
+2. **Always render**: Worker continuously renders next frame in background (overscan or viewable area)
+3. **Update bounds**: When offset exceeds threshold, update canvas bounds to new position
+4. **Preserve coordinate**: When buffer swaps, adjust display offset to keep mouse coordinate fixed
 
-### Coordinate Conversion
-Use **render size** (width_/height_) for conversion, but be aware of margins.
+### Requirements
 
-```cpp
-FloatType screen_to_x = x_range / static_cast<FloatType>(width_);
-FloatType pan_x = -pending_offset * screen_to_x;
-```
+- **No jumps**: Point under mouse must remain same Mandelbrot coordinate throughout dragging
+- **Smooth motion**: Image follows mouse without stutter
+- **Continuous rendering**: Worker always busy rendering next frame
+- **Correct swap**: Buffer swap must account for difference between old and new texture bounds
+
+### How Coordinate Preservation Works
+
+When a render completes and buffers swap:
+1. Calculate difference between old displayed texture bounds and new texture bounds
+2. Convert this difference to screen pixels
+3. Adjust display offset by this amount
+4. This ensures the mouse coordinate in Mandelbrot space remains fixed
 
 ---
 
-## Zooming
+## Synchronization & Thread Safety
 
-### State
-```cpp
-float display_scale_;                    // Visual scale (1.0 = normal)
-float zoom_center_x_, zoom_center_y_;    // Mouse position when zoom started
-```
+### Core Principle
 
-### Symmetric Zoom Formula
-Use exponential for perfect reversibility:
-```cpp
-zoom_factor = pow(1.0 + zoom_step_, wheel_delta);
-// zoom_in then zoom_out: 1.5^1 × 1.5^(-1) = 1.0
-```
+UI thread never blocks on backend operations. All rendering happens asynchronously.
 
-### Flow
-1. **Mouse wheel** →
-   - `display_scale_ = zoom_factor` (instant visual scale)
-   - `zoom_center_ = mouse_position` (scale centered here)
-   - `suppress_texture_updates_ = true`
-   - Calculate new bounds centered on mouse
-   - Start render
-2. **During render** → Old texture shown scaled around `zoom_center_`
-3. **Render completes** →
-   - Upload to back, swap to front
-   - `display_scale_ = 1.0`
-   - `suppress_texture_updates_ = false`
+### Bounds Updates
 
-### Drawing with Scale and Overscan
-```cpp
-float scale_offset_x = zoom_center_x_ * (1.0f - display_scale_);
-float margin_offset_x = margin_x_ * display_scale_;  // margin scales with zoom
-float draw_pos_x = scale_offset_x + display_offset_x_ - margin_offset_x;
-ImVec2 image_min(draw_pos_x, ...);
-ImVec2 image_max(draw_pos_x + scaled_width, ...);
-```
+- UI thread is only writer of canvas bounds
+- Workers capture bounds snapshot when render starts
+- If bounds change mid-render, generation increment cancels stale render
 
-The `-margin_offset` ensures viewport (0,0) shows the center of the buffer. During zoom, the margin offset also scales so the zoom center stays fixed.
+### Pixel Writes
+
+- Each renderer writes to its own buffer (no sharing)
+- Worker merges completed buffers into main canvas (thread-safe)
+- Worker validates generation before merge (drops stale buffers)
+- All pixel writes happen asynchronously
+
+### Generation-Based Cancellation
+
+- Atomic generation counter tracks current render
+- UI increments generation to cancel in-flight renders
+- Renderers check generation periodically and bail out if mismatch
+- Worker drops completed buffers if generation doesn't match
+
+### Thread Safety Guarantees
+
+- **No deadlocks**: Minimal locking, UI never acquires merge locks
+- **No segfaults**: Clear buffer ownership, no shared memory
+- **No race conditions**: Single writer for bounds, atomic generation, per-renderer buffers
 
 ---
 
-## Render Completion Detection
-
-```cpp
-bool is_render_in_progress() const {
-    // Skip texture_dirty_ when suppressing (it stays true until final upload)
-    if (!suppress_texture_updates_ && texture_dirty_) return true;
-    ThreadPool* pool = renderer_->get_thread_pool();
-    return !pool->is_idle();
-}
-```
-
----
-
-## Generation Counter
-
-Invalidates stale work when user interrupts:
-```cpp
-void generate_mandelbrot_recurse(..., unsigned int generation) {
-    if (generation != render_generation_.load()) return;  // Stale, exit
-    // ... compute ...
-    if (generation == render_generation_.load() && callback) {
-        callback->on_pixels_updated(pixels_, width_, height_);
-    }
-}
-```
-
-Increment `render_generation_` before starting new render to cancel in-flight work.
-
----
-
-## Recursive Boundary Algorithm
+## Rendering Algorithm
 
 1. Draw boundary pixels of rectangle
 2. If all boundary pixels same color → flood fill interior
-3. Otherwise → subdivide into 4 quadrants, recurse
+3. Otherwise → subdivide into 4×4 quadrants, recurse
 4. Base case: small regions computed pixel-by-pixel
+5. All work parallelized across thread pool
 
 ---
 
@@ -199,35 +156,25 @@ Increment `render_generation_` before starting new render to cancel in-flight wo
 
 ```
 Each frame:
-  ├─ Handle resize → triggers re-render
-  ├─ Upload pixels to back, swap to front (skip if suppress_texture_updates_)
-  ├─ Draw texture_front_ at (display_offset_, display_scale_)
+  ├─ Check render completion → merge buffer, upload to back texture
+  ├─ Swap textures if update needed
+  ├─ Draw grey background + texture (via viewport manager)
   ├─ Handle input (drag/zoom/double-click)
-  └─ Check render completion → upload final, reset state
-```
-
----
-
-## Constants
-
-```cpp
-// Panning thresholds (derived from overscan margin)
-float start_threshold = margin * 0.8f;   // Trigger render at 80% of margin
-float restart_threshold = margin;         // Restart threshold = full margin
-constexpr FloatType zoom_step_ = 0.5;     // Zoom base = 1.5
+  └─ Update display offset/scale for smooth interaction
 ```
 
 ---
 
 ## Summary
 
-| Feature | Mechanism |
-|---------|-----------|
-| Smooth panning | `display_offset_` shifts texture; old content during render |
-| Smooth zooming | `display_scale_` scales texture; old content during render |
+| Requirement | Behavior |
+|-------------|----------|
+| Smooth panning | Display offset shifts texture during drag |
+| Smooth zooming | Display scale scales texture during zoom |
 | No flickering | Double-buffered textures with swap |
-| Atomic updates | Suppress progressive updates during interaction |
-| Offset preservation | Subtract `render_start_offset_` on completion |
-| Interruptible | Generation counter invalidates stale tasks |
-| Fast rendering | Boundary-trace with flood fill, parallel ThreadPool |
-| Overscan | Buffer is ~1.33x viewport to allow smooth panning/zooming without edges |
+| Mouse coordinate preservation | Adjust display offset on swap using viewport delta |
+| Continuous rendering | Worker always renders next frame (overscan or viewable) |
+| Interruptible | Generation counter cancels stale renders |
+| Fast rendering | Boundary-trace with flood fill, parallel computation |
+| Overscan | Canvas ~1.33x viewport for smooth panning without edges |
+| Thread safety | Per-renderer buffers, minimal locking |
