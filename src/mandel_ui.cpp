@@ -164,6 +164,14 @@ void MandelUI::start_render()
     render_start_canvas_x_max_ = canvas_x_max_;
     render_start_canvas_y_min_ = canvas_y_min_;
     render_start_canvas_y_max_ = canvas_y_max_;
+    
+    // Update worker bounds!
+    // WorkerBase stores bounds as public members, update them before starting render
+    worker_->canvas_x_min_ = canvas_x_min_;
+    worker_->canvas_x_max_ = canvas_x_max_;
+    worker_->canvas_y_min_ = canvas_y_min_;
+    worker_->canvas_y_max_ = canvas_y_max_;
+    
     worker_->set_max_iterations(max_iterations_);
     worker_->start_render();
     if (!worker_->try_complete_render())
@@ -252,15 +260,20 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
 
     // Convert display_offset (viewport pixels) to complex plane delta.
     // See DRAGGING_REDESIGN.md and plan: screen (x right, y down) vs Mandel (x right, y up).
-    FloatType pan_x = -display_offset_x * screen_to_x;
-    FloatType pan_y = display_offset_y * screen_to_y;
     
-    // Snap pan to nearest integer pixel size to avoid sub-pixel shimmer during continuous panning
     // Calculate pixel size in complex units
     FloatType canvas_width_f = static_cast<FloatType>(overscan_viewport_.canvas_width());
     FloatType canvas_height_f = static_cast<FloatType>(overscan_viewport_.canvas_height());
     FloatType pixel_size_x = (canvas_x_max_ - canvas_x_min_) / canvas_width_f;
     FloatType pixel_size_y = (canvas_y_max_ - canvas_y_min_) / canvas_height_f; // Magnitude depends on min/max order
+
+    // Use pixel_size directly for pan calculation to ensure 1:1 mapping between screen pixels and complex shift
+    // FloatType screen_to_x = viewport_x_range / static_cast<FloatType>(vp_w);
+    // FloatType pan_x = -display_offset_x * screen_to_x;
+    FloatType pan_x = -display_offset_x * pixel_size_x;
+    FloatType pan_y = display_offset_y * pixel_size_y;
+    
+    // Snap pan to nearest integer pixel size to avoid sub-pixel shimmer during continuous panning
     
     // Snap to nearest multiple of pixel size
     // Calculate exact integer pixels to avoid float round-trip errors
@@ -374,6 +387,17 @@ void MandelUI::convert_display_offset_on_swap()
     float px_shift_x = 0.0f;
     float px_shift_y = 0.0f;
 
+    FloatType pixel_size_x = (displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_) / static_cast<FloatType>(cw);
+    // pixel_size_y is magnitude (max-min)/height
+    FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / static_cast<FloatType>(ch);
+    
+    // Direct shift logic based on bound changes
+    // This avoids round-trip precision errors and drift
+    // The new texture is shifted relative to old texture by (new_min - old_min)
+    FloatType shift_x = render_start_canvas_x_min_ - displayed_texture_canvas_x_min_;
+    // For Y, use y_max as anchor (Top-Down, y=0 is y_max)
+    FloatType shift_y = render_start_canvas_y_max_ - displayed_texture_canvas_y_max_;
+
     if (render_source_ == RenderSource::PAN)
     {
         // Use exact integer pixels calculated in handle_pan
@@ -381,21 +405,22 @@ void MandelUI::convert_display_offset_on_swap()
         px_shift_x = static_cast<float>(pending_pan_pixels_x_);
         px_shift_y = static_cast<float>(pending_pan_pixels_y_);
         DEBUG_PRINTF("  Using Pending Pixels: (%ld, %ld)\n", pending_pan_pixels_x_, pending_pan_pixels_y_);
+        
+        // Sanity check: compare with calculated shift
+        float calc_shift_x = static_cast<float>(std::round(shift_x / pixel_size_x));
+        float calc_shift_y = static_cast<float>(std::round(shift_y / pixel_size_y));
+        if (std::abs(px_shift_x - calc_shift_x) > 1.0f || std::abs(px_shift_y - calc_shift_y) > 1.0f)
+        {
+            DEBUG_PRINTF("  WARNING: Pending shift differs from Calculated shift! Pending=(%.0f, %.0f) Calc=(%.0f, %.0f)\n",
+                   px_shift_x, px_shift_y, calc_shift_x, calc_shift_y);
+            // Fallback to calculated shift if divergence is significant
+            // This prevents using stale/wrong pending values if render_start logic drifted
+            px_shift_x = calc_shift_x;
+            px_shift_y = calc_shift_y;
+        }
     }
     else
     {
-        // Direct shift logic based on bound changes
-        // This avoids round-trip precision errors and drift
-        // The new texture is shifted relative to old texture by (new_min - old_min)
-        
-        FloatType shift_x = render_start_canvas_x_min_ - displayed_texture_canvas_x_min_;
-        // For Y, use y_max as anchor (Top-Down, y=0 is y_max)
-        FloatType shift_y = render_start_canvas_y_max_ - displayed_texture_canvas_y_max_;
-    
-        FloatType pixel_size_x = (displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_) / static_cast<FloatType>(cw);
-        // pixel_size_y is magnitude (max-min)/height
-        FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / static_cast<FloatType>(ch);
-    
         // Calculate shift in pixels
         // We expect this to be close to integer because handle_pan snaps bounds
         // USE ROUND to avoid truncation errors (e.g. 0.999 -> 0)
