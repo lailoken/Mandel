@@ -54,6 +54,10 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
       max_iterations_(512),
       has_pending_settings_(false)
 {
+    // Load saved views from file
+    LoadedViews loaded = load_views_from_file();
+    saved_views_ = loaded.saved_views;
+
     // Convert viewport bounds to canvas bounds (add overscan margins)
     convert_viewport_to_canvas_bounds(-2.0L, 0.5L, -1.125L, 1.125L, canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_);
     displayed_texture_canvas_x_min_ = canvas_x_min_;
@@ -735,9 +739,14 @@ void MandelUI::apply_view_state(const ViewState& state)
     start_render();
 }
 
-void MandelUI::save_view_state(const std::string& /*name*/)
+void MandelUI::save_view_state(const std::string& name)
 {
-    // Stub
+    // Update the specific view with current viewport settings
+    ViewState viewport = get_viewport_bounds();
+    saved_views_[name] = viewport;
+    
+    // Save all views to file
+    save_views_to_file(saved_views_);
 }
 
 void MandelUI::extend_bounds_for_overscan(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const
@@ -757,8 +766,7 @@ void MandelUI::reset_to_initial() { apply_view_state(get_initial_bounds()); }
 
 std::map<std::string, ViewState>& MandelUI::get_saved_views()
 {
-    static std::map<std::string, ViewState> empty;
-    return empty;
+    return saved_views_;
 }
 
 char* MandelUI::get_new_view_name_buffer()

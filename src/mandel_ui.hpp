@@ -145,6 +145,9 @@ private:
     ViewState pending_settings_;
     bool has_pending_settings_;
 
+    // Saved views
+    std::map<std::string, ViewState> saved_views_;
+
     // Test helper (friend class for unit testing)
     friend class MandelUITestHelper;
 };

@@ -194,10 +194,55 @@ void MandelControl::draw()
             double zoom_d = static_cast<double>(zoom);
             double const min_zoom_d = static_cast<double>(min_zoom);
             double const max_zoom_d = static_cast<double>(max_zoom);
-            bool zoom_edited = ImGui::SliderScalar("Zoom", ImGuiDataType_Double, &zoom_d, &min_zoom_d, &max_zoom_d, "%.4f", ImGuiSliderFlags_Logarithmic);
+
+            // Convert zoom to log10 for display (power)
+            // If zoom is 1.0 (10^0), display 0.0
+            // If zoom is 10.0 (10^1), display 1.0
+            // If zoom is 1000.0 (10^3), display 3.0
+            // We'll construct a format string like "10^%.2f"
+            double log_zoom = std::log10(std::max(zoom_d, min_zoom_d));
+
+            // Format string: "10^<power>"
+            char zoom_format[32];
+            std::snprintf(zoom_format, sizeof(zoom_format), "10^%%.2f");
+
+            // But wait, ImGui::SliderScalar displays the VALUE, not a derived string from the value unless we change the value type or intercept the display.
+            // SliderScalar uses the value passed to it. If we want to display the power, we could map the slider to the log scale directly?
+            // But the slider is already logarithmic (ImGuiSliderFlags_Logarithmic).
+            // Let's keep the slider value as the actual zoom, but provide a custom format string if possible?
+            // ImGui::SliderScalar format is for the value itself.
+
+            // Alternative: Don't use standard display. Render the slider with an empty format "" and draw text manually?
+            // Or just format the value in the slider as "%.2e" (scientific notation) which is close to 10^X.
+            // But the user specifically asked for "10^X".
+
+            // ImGui doesn't support custom value formatting callbacks easily in standard widgets.
+            // However, we can use a hack: pass "" as format to hide the number, then draw text over it?
+            // Or better: Use ImGui::SliderScalar with "10^%.2f" format? NO, because that would expect the value to be the power.
+
+            // Let's change the slider to control the EXPONENT (log10(zoom)) instead of the zoom directly.
+            // Then we can format it as "10^%.2f".
+            // min_zoom_log = log10(0.1) = -1.0
+            // max_zoom_log = log10(1e15) = 15.0
+
+            double log_zoom_val = std::log10(zoom_d);
+            double min_log_zoom = std::log10(min_zoom_d);
+            double max_log_zoom = std::log10(max_zoom_d);
+
+            bool zoom_edited = ImGui::SliderScalar("Zoom", ImGuiDataType_Double, &log_zoom_val, &min_log_zoom, &max_log_zoom, "10^%.2f");
+
+            // Tooltip for precise value
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+            {
+                ImGui::SetTooltip("Zoom Factor: x%.2f", zoom_d);
+            }
+
             if (zoom_edited)
             {
-                FloatType new_zoom = static_cast<FloatType>(zoom_d);
+                // Convert back from log10(zoom) to zoom
+                double new_zoom_d = std::pow(10.0, log_zoom_val);
+
+                FloatType new_zoom = static_cast<FloatType>(new_zoom_d);
                 new_zoom = std::clamp(new_zoom, min_zoom, max_zoom);
                 // Convert zoom change to bounds change
                 FloatType center_x = (x_min + x_max) / static_cast<FloatType>(2.0);
@@ -229,7 +274,7 @@ void MandelControl::draw()
 
             ImGui::Text("Render Generation: %d", ui_interface_->get_render_generation());
 
-            bool thread_pool_active = !ui_interface_->is_render_in_progress();
+            bool thread_pool_active = ui_interface_->is_render_in_progress();
             bool is_dragging = ui_interface_->is_dragging();
 
             ImGui::BeginDisabled();
