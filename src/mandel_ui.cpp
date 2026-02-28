@@ -12,7 +12,7 @@
 #ifdef _DEBUG
 #define DEBUG_PRINTF(...) std::printf(__VA_ARGS__)
 #else
-#define DEBUG_PRINTF(...) std::printf(__VA_ARGS__)
+#define DEBUG_PRINTF(...) ((void)0)
 #endif
 
 namespace mandel

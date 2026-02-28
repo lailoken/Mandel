@@ -45,14 +45,16 @@ struct ColorScheme
     static const ColorScheme& get_instance();
 };
 
-class MandelbrotRenderer
+class MandelbrotRenderer : public std::enable_shared_from_this<MandelbrotRenderer>
 {
 public:
-   // Constructor takes all parameters and starts rendering immediately
-   // Renderer creates its own internal buffer - no canvas pointer needed
+   // Constructor takes all parameters. Does NOT start rendering immediately (call start() for that).
    MandelbrotRenderer(int width, int height, FloatType x_min, FloatType x_max, FloatType y_min, FloatType y_max, int max_iterations, std::atomic<unsigned int>& current_generation,
                       unsigned int start_generation, ThreadPool& thread_pool);
    ~MandelbrotRenderer();
+
+   // Start the rendering process (must be called after constructor)
+   void start();
 
    static constexpr FloatType default_x_min = static_cast<FloatType>(-2.0);
    static constexpr FloatType default_x_max = static_cast<FloatType>(0.5);
@@ -68,26 +70,18 @@ public:
 private:
    // Internal methods
    int compute_mandelbrot(::std::complex<FloatType> c, int max_iter) const;
-   void paint_pixel(int x_pos, int y_pos, const ColorScheme::Color& color);
-   int process_pixel(int32_t x_pos, int32_t y_pos);
    void generate_mandelbrot_direct(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, unsigned int start_generation, unsigned int current_generation);
    void generate_mandelbrot_recurse(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, unsigned int start_generation, unsigned int current_generation);
-   void generate_mandelbrot(unsigned int start_generation, unsigned int current_generation);
 
    // Member variables
-   int width_;
-   int height_;
-   FloatType x_min_;
-   FloatType x_max_;
-   FloatType y_min_;
-   FloatType y_max_;
-   int max_iterations_;
+   const int max_iterations_;
+   const unsigned int start_generation_;
 
-   std::vector<unsigned char> pixels_;  // Own internal buffer (RGBA, size = width_ * height_ * 4)
-   CanvasMetrics metrics_;
+   std::vector<unsigned char> pixels_;  // Own internal buffer (RGBA, size = metrics_.width * metrics_.height * 4)
+   const CanvasMetrics metrics_;
 
    ThreadPool& thread_pool_;                            // Reference to thread pool (always set)
-   std::atomic<unsigned int>* current_generation_ref_;  // Reference to current generation
+   std::atomic<unsigned int>* const current_generation_ref_;  // Reference to current generation
 };
 
 }  // namespace mandel

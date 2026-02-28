@@ -299,19 +299,6 @@ if(UNIT_TEST)
 endif()
 
 # Add unit test executables (always available, not just in UNIT_TEST mode)
-add_executable(test_mandel_renderer
-    test_mandel_renderer.cpp
-    src/mandel.cpp
-    src/thread_pool.cpp
-)
-target_include_directories(test_mandel_renderer PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_compile_definitions(test_mandel_renderer PRIVATE
-    $<$<CONFIG:Debug>:_DEBUG>
-)
-target_link_libraries(test_mandel_renderer PRIVATE pthread)
-
 add_executable(test_mandel_worker
     test_mandel_worker.cpp
     src/mandel.cpp

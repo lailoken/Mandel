@@ -43,7 +43,7 @@ public:
     unsigned int get_start_generation() const { return start_generation_; }
 
 private:
-    std::unique_ptr<MandelbrotRenderer> renderer_;  // Created fresh for each render
+    std::shared_ptr<MandelbrotRenderer> renderer_;  // Created fresh for each render
     ThreadPool& thread_pool_;  // Reference to thread pool (always set)
     int max_iterations_;  // Stored for renderer creation
     std::mutex canvas_mutex_;  // Protects canvas during merge operations

@@ -1,9 +1,8 @@
 #pragma once
 
-#include "worker_base.hpp"
-
 #include <atomic>
-#include <vector>
+
+#include "worker_base.hpp"
 
 namespace mandel
 {

@@ -60,7 +60,7 @@ void MandelWorker::start_render()
     // Create renderer with all parameters - it starts rendering immediately
     // Renderer creates its own internal buffer - no canvas pointer needed
     DEBUG_PRINTF("[WORKER] Creating renderer: start_gen=%u\n", start_generation_);
-    renderer_ = std::make_unique<MandelbrotRenderer>(
+    renderer_ = std::make_shared<MandelbrotRenderer>(
         canvas_width_,
         canvas_height_,
         x_min,
@@ -71,6 +71,7 @@ void MandelWorker::start_render()
         current_generation_,
         start_generation_,
         thread_pool_);
+    renderer_->start(); // Must call start() to initiate tasks (uses shared_from_this)
     DEBUG_PRINTF("[WORKER] Renderer created: renderer=%p\n", static_cast<void*>(renderer_.get()));
     
     DEBUG_PRINTF("[WORKER] start_render: width=%d, height=%d, bounds=(%.20Lf, %.20Lf, %.20Lf, %.20Lf), max_iter=%d\n",
@@ -172,18 +173,6 @@ bool MandelWorker::wait_and_get_buffer(std::vector<unsigned char>& target_buffer
         DEBUG_PRINTF("[WORKER] Merging buffer: renderer_pixels.size()=%zu, canvas_.size()=%zu\n", 
                renderer_pixels.size(), canvas_.size());
         
-#ifdef _DEBUG
-        // Check if renderer actually wrote any non-black pixels
-        size_t non_black_count = 0;
-        for (size_t i = 0; i < renderer_pixels.size() && i < 1000; i += 4)
-        {
-            if (renderer_pixels[i] != 0 || renderer_pixels[i+1] != 0 || renderer_pixels[i+2] != 0)
-            {
-                non_black_count++;
-            }
-        }
-        DEBUG_PRINTF("[WORKER] Non-black pixels in first 250 pixels: %zu\n", non_black_count);
-#endif
         
         std::memcpy(canvas_.data(), renderer_pixels.data(), canvas_.size());
         DEBUG_PRINTF("[WORKER] Buffer merged successfully\n");
