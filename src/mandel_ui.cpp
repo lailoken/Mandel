@@ -165,8 +165,7 @@ void MandelUI::start_render()
     render_start_canvas_y_min_ = canvas_y_min_;
     render_start_canvas_y_max_ = canvas_y_max_;
     
-    // Update worker bounds!
-    // WorkerBase stores bounds as public members, update them before starting render
+    // Update worker bounds so it renders the correct region
     worker_->canvas_x_min_ = canvas_x_min_;
     worker_->canvas_x_max_ = canvas_x_max_;
     worker_->canvas_y_min_ = canvas_y_min_;
@@ -268,8 +267,6 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
     FloatType pixel_size_y = (canvas_y_max_ - canvas_y_min_) / canvas_height_f; // Magnitude depends on min/max order
 
     // Use pixel_size directly for pan calculation to ensure 1:1 mapping between screen pixels and complex shift
-    // FloatType screen_to_x = viewport_x_range / static_cast<FloatType>(vp_w);
-    // FloatType pan_x = -display_offset_x * screen_to_x;
     FloatType pan_x = -display_offset_x * pixel_size_x;
     FloatType pan_y = display_offset_y * pixel_size_y;
     
@@ -381,9 +378,6 @@ void MandelUI::convert_display_offset_on_swap()
     int ch = overscan_viewport_.canvas_height();
 
     // Direct shift logic based on bound changes
-    // This avoids round-trip precision errors and drift
-    // The new texture is shifted relative to old texture by (new_min - old_min)
-    
     float px_shift_x = 0.0f;
     float px_shift_y = 0.0f;
 
@@ -391,8 +385,6 @@ void MandelUI::convert_display_offset_on_swap()
     // pixel_size_y is magnitude (max-min)/height
     FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / static_cast<FloatType>(ch);
     
-    // Direct shift logic based on bound changes
-    // This avoids round-trip precision errors and drift
     // The new texture is shifted relative to old texture by (new_min - old_min)
     FloatType shift_x = render_start_canvas_x_min_ - displayed_texture_canvas_x_min_;
     // For Y, use y_max as anchor (Top-Down, y=0 is y_max)
@@ -401,7 +393,6 @@ void MandelUI::convert_display_offset_on_swap()
     if (render_source_ == RenderSource::PAN)
     {
         // Use exact integer pixels calculated in handle_pan
-        // This avoids ANY floating point drift or jumps
         px_shift_x = static_cast<float>(pending_pan_pixels_x_);
         px_shift_y = static_cast<float>(pending_pan_pixels_y_);
         DEBUG_PRINTF("  Using Pending Pixels: (%ld, %ld)\n", pending_pan_pixels_x_, pending_pan_pixels_y_);
@@ -414,7 +405,6 @@ void MandelUI::convert_display_offset_on_swap()
             DEBUG_PRINTF("  WARNING: Pending shift differs from Calculated shift! Pending=(%.0f, %.0f) Calc=(%.0f, %.0f)\n",
                    px_shift_x, px_shift_y, calc_shift_x, calc_shift_y);
             // Fallback to calculated shift if divergence is significant
-            // This prevents using stale/wrong pending values if render_start logic drifted
             px_shift_x = calc_shift_x;
             px_shift_y = calc_shift_y;
         }
@@ -422,74 +412,13 @@ void MandelUI::convert_display_offset_on_swap()
     else
     {
         // Calculate shift in pixels
-        // We expect this to be close to integer because handle_pan snaps bounds
-        // USE ROUND to avoid truncation errors (e.g. 0.999 -> 0)
+        // USE ROUND to avoid truncation errors
         px_shift_x = static_cast<float>(std::round(shift_x / pixel_size_x));
-        
-        // shift_y: NewMax - OldMax.
-        // If PanY > 0 (Drag Down). NewMax > OldMax. shift_y > 0.
-        // px_shift_y > 0.
         px_shift_y = static_cast<float>(std::round(shift_y / pixel_size_y));
         
         DEBUG_PRINTF("  Calculated Shift Pixels: (%.2f, %.2f)\n", px_shift_x, px_shift_y);
     }
 
-    // Y axis: PanY > 0 -> Viewport moves Down -> Texture moves Up relative to Viewport (Wait. Texture stays fixed in Complex).
-    // Feature moves UP in Texture Space (smaller Y index)? No.
-    // Top-Down: Y=0 is Y_MAX. Y=Height is Y_MIN.
-    // PanY > 0. Viewport Y_MAX increases.
-    // Y_MAX (New) > Y_MAX (Old).
-    // Feature (Absolute Y).
-    // Index_Old = (Y_MAX_Old - Y) / Size.
-    // Index_New = (Y_MAX_New - Y) / Size.
-    // Y_MAX_New = Y_MAX_Old + Shift.
-    // Index_New = (Y_MAX_Old + Shift - Y) / Size = Index_Old + (Shift/Size).
-    // So Index INCREASES.
-    // Feature moves DOWN in Texture Space (larger Y index).
-    // We display New Texture. Feature is at Index+Shift.
-    // We want Feature at ScreenY.
-    // ScreenY = Margin + Index_New + Offset_New. (Y increases Down).
-    // ScreenY = Margin + (Index_Old + Shift) + Offset_New.
-    // Old ScreenY = Margin + Index_Old + Offset_Old.
-    // Margin + Index_Old + Shift + Offset_New = Margin + Index_Old + Offset_Old.
-    // Shift + Offset_New = Offset_Old.
-    // Offset_New = Offset_Old - Shift.
-    // So display_offset_y_ -= px_shift_y.
-    
-    // Check PanY > 0 (Drag Down). Offset > 0.
-    // Shift > 0.
-    // Offset_New < Offset_Old.
-    // If we dragged Down (Offset 50). Panned Down (Shift 50).
-    // Offset_New should be 0.
-    // 50 - 50 = 0.
-    // Correct!
-    
-    // Check X axis.
-    // PanX > 0 (Drag Left? No. PanX > 0 -> Viewport moves Right).
-    // Drag Left -> Offset < 0.
-    // PanX = -Offset = Positive.
-    // ShiftX > 0.
-    // Index_Old = (X - X_MIN_Old) / Size.
-    // Index_New = (X - X_MIN_New) / Size = (X - (X_MIN_Old + Shift)) / Size = Index_Old - Shift.
-    // ScreenX = Margin + Index_New - Offset_New. (Wait. X formula: M + S - O? No. M + S - O).
-    // Let's check calculate_draw_info logic.
-    // texture_draw_x = draw_x + texture_offset_x.
-    // It shifts Texture.
-    // If Offset > 0. Texture shifts Right.
-    // ScreenX of Feature = TextureX + Offset.
-    // TextureX_New = TextureX_Old - Shift.
-    // ScreenX = (TextureX_Old - Shift) + Offset_New.
-    // Old ScreenX = TextureX_Old + Offset_Old.
-    // TextureX_Old - Shift + Offset_New = TextureX_Old + Offset_Old.
-    // Offset_New - Shift = Offset_Old.
-    // Offset_New = Offset_Old + Shift.
-    
-    // Verify Drag Left (Offset < 0).
-    // PanX > 0. Shift > 0.
-    // Offset_New = Offset_Old + Shift.
-    // -50 + 50 = 0.
-    // Correct!
-    
     display_offset_x_ += px_shift_x;
     display_offset_y_ -= px_shift_y; // Confirmed subtraction for Y
     
