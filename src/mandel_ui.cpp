@@ -43,6 +43,8 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
       render_start_canvas_y_max_(1.125L),
       pending_pan_pixels_x_(0),
       pending_pan_pixels_y_(0),
+      pending_zoom_offset_x_(0.0f),
+      pending_zoom_offset_y_(0.0f),
       render_source_(RenderSource::OTHER),
       worker_(nullptr),
       thread_pool_(thread_pool),
@@ -221,6 +223,14 @@ void MandelUI::handle_input()
             is_dragging_ = false;
         }
     }
+
+    // Mouse wheel zoom: only when mouse is over viewport and not over any ImGui window
+    if (io.MouseWheel != 0.0f && mouse_over_viewport && !control_window_hovered && !imgui_wants_mouse)
+    {
+        float mouse_screen_x = mouse_pos.x - viewport_pos.x;
+        float mouse_screen_y = mouse_pos.y - viewport_pos.y;
+        handle_zoom(io.MouseWheel, mouse_screen_x, mouse_screen_y);
+    }
 }
 
 void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
@@ -318,6 +328,80 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
     start_render();
 }
 
+void MandelUI::handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_screen_y)
+{
+    // 1.2x zoom per scroll step; wheel_delta is typically ±1 per notch
+    float zoom_factor = std::pow(1.2f, wheel_delta);
+
+    int cw = overscan_viewport_.canvas_width();
+    int ch = overscan_viewport_.canvas_height();
+    int mx = overscan_viewport_.margin_x();
+    int my = overscan_viewport_.margin_y();
+
+    // Compute the complex point under the mouse from the DISPLAYED texture + current display_offset
+    // (this is what the user actually sees regardless of pending renders)
+    float canvas_px = static_cast<float>(mx) + mouse_screen_x - display_offset_x_;
+    float canvas_py = static_cast<float>(my) + mouse_screen_y - display_offset_y_;
+
+    FloatType disp_x_range = displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_;
+    FloatType disp_y_range = displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_;
+    FloatType complex_x = displayed_texture_canvas_x_min_ + static_cast<FloatType>(canvas_px) / static_cast<FloatType>(cw) * disp_x_range;
+    FloatType complex_y = displayed_texture_canvas_y_max_ - static_cast<FloatType>(canvas_py) / static_cast<FloatType>(ch) * disp_y_range;
+
+    // Zoom from the CURRENT PENDING viewport bounds so rapid scrolling accumulates properly
+    FloatType vx_min, vx_max, vy_min, vy_max;
+    convert_canvas_to_viewport_bounds(canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_,
+                                       vx_min, vx_max, vy_min, vy_max);
+
+    FloatType zoom_f = static_cast<FloatType>(zoom_factor);
+    FloatType new_vx_min = complex_x + (vx_min - complex_x) / zoom_f;
+    FloatType new_vx_max = complex_x + (vx_max - complex_x) / zoom_f;
+    FloatType new_vy_min = complex_y + (vy_min - complex_y) / zoom_f;
+    FloatType new_vy_max = complex_y + (vy_max - complex_y) / zoom_f;
+
+    // Convert to canvas bounds
+    FloatType new_cx_min, new_cx_max, new_cy_min, new_cy_max;
+    convert_viewport_to_canvas_bounds(new_vx_min, new_vx_max, new_vy_min, new_vy_max,
+                                       new_cx_min, new_cx_max, new_cy_min, new_cy_max);
+
+    // Compute target display_offset so complex_x/y stays under (mouse_screen_x, mouse_screen_y)
+    FloatType new_cx_range = new_cx_max - new_cx_min;
+    FloatType new_cy_range = new_cy_max - new_cy_min;
+    float new_canvas_px = static_cast<float>((complex_x - new_cx_min) / new_cx_range * static_cast<FloatType>(cw));
+    float new_canvas_py = static_cast<float>((new_cy_max - complex_y) / new_cy_range * static_cast<FloatType>(ch));
+    float target_offset_x = static_cast<float>(mx) + mouse_screen_x - new_canvas_px;
+    float target_offset_y = static_cast<float>(my) + mouse_screen_y - new_canvas_py;
+
+    DEBUG_PRINTF("handle_zoom: wheel=%.2f factor=%.4f complex=(%.6Lf, %.6Lf) target_offset=(%.2f, %.2f)\n",
+                 wheel_delta, zoom_factor, complex_x, complex_y, target_offset_x, target_offset_y);
+
+    // Save current canvas as displayed if no render is pending
+    if (!render_pending_)
+    {
+        displayed_texture_canvas_x_min_ = canvas_x_min_;
+        displayed_texture_canvas_x_max_ = canvas_x_max_;
+        displayed_texture_canvas_y_min_ = canvas_y_min_;
+        displayed_texture_canvas_y_max_ = canvas_y_max_;
+    }
+
+    canvas_x_min_ = new_cx_min;
+    canvas_x_max_ = new_cx_max;
+    canvas_y_min_ = new_cy_min;
+    canvas_y_max_ = new_cy_max;
+
+    // Keep applied_settings_ in sync with the new zoom bounds so the control panel
+    // does not see a spurious "settings changed" and trigger apply_pending_settings_if_ready,
+    // which would reset display_offset to 0 and cause a visual "jump out" after the zoom swap.
+    applied_settings_ = ViewState(new_vx_min, new_vx_max, new_vy_min, new_vy_max, max_iterations_);
+    has_pending_settings_ = false;
+
+    pending_zoom_offset_x_ = target_offset_x;
+    pending_zoom_offset_y_ = target_offset_y;
+    render_source_ = RenderSource::ZOOM;
+
+    start_render();
+}
+
 bool MandelUI::compute_swap_conversion(
     FloatType displayed_canvas_x_min, FloatType displayed_canvas_x_max,
     FloatType displayed_canvas_y_min, FloatType displayed_canvas_y_max,
@@ -408,6 +492,15 @@ void MandelUI::convert_display_offset_on_swap()
             px_shift_x = calc_shift_x;
             px_shift_y = calc_shift_y;
         }
+        display_offset_x_ += px_shift_x;
+        display_offset_y_ -= px_shift_y;
+    }
+    else if (render_source_ == RenderSource::ZOOM)
+    {
+        // Zoom: directly set the pre-computed target display_offset (keeps mouse point stable)
+        display_offset_x_ = pending_zoom_offset_x_;
+        display_offset_y_ = pending_zoom_offset_y_;
+        DEBUG_PRINTF("  ZOOM: set offset=(%.2f, %.2f)\n", pending_zoom_offset_x_, pending_zoom_offset_y_);
     }
     else
     {
@@ -417,10 +510,9 @@ void MandelUI::convert_display_offset_on_swap()
         px_shift_y = static_cast<float>(std::round(shift_y / pixel_size_y));
         
         DEBUG_PRINTF("  Calculated Shift Pixels: (%.2f, %.2f)\n", px_shift_x, px_shift_y);
+        display_offset_x_ += px_shift_x;
+        display_offset_y_ -= px_shift_y;
     }
-
-    display_offset_x_ += px_shift_x;
-    display_offset_y_ -= px_shift_y; // Confirmed subtraction for Y
     
     DEBUG_PRINTF("  NEW offset=(%.2f, %.2f)\n", display_offset_x_, display_offset_y_);
 }
@@ -618,7 +710,10 @@ void MandelUI::apply_view_state(const ViewState& state)
         overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(), render_generation_,
         canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, thread_pool_);
     worker_->set_max_iterations(max_iterations_);
-    render_source_ = RenderSource::OTHER;
+    // New view is already centered; display_offset = 0 after swap keeps viewport center stable
+    pending_zoom_offset_x_ = 0.0f;
+    pending_zoom_offset_y_ = 0.0f;
+    render_source_ = RenderSource::ZOOM;
     start_render();
 }
 

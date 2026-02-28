@@ -82,6 +82,7 @@ private:
                                            FloatType canvas_y_max, FloatType& viewport_x_min, FloatType& viewport_x_max,
                                            FloatType& viewport_y_min, FloatType& viewport_y_max) const;
     void handle_pan(float display_offset_x, float display_offset_y);
+    void handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_screen_y);
     // Convert display_offset from old texture bounds to new (so same complex point stays under mouse)
     void convert_display_offset_on_swap();
 
@@ -122,7 +123,10 @@ private:
     // Pending Pan Pixels (exact integer shift from handle_pan)
     long pending_pan_pixels_x_;
     long pending_pan_pixels_y_;
-    enum class RenderSource { PAN, OTHER };
+    // Pending zoom display offset (target display_offset when zoom render completes)
+    float pending_zoom_offset_x_;
+    float pending_zoom_offset_y_;
+    enum class RenderSource { PAN, ZOOM, OTHER };
     RenderSource render_source_;
 
     // Worker (MandelWorker for real Mandelbrot rendering)
