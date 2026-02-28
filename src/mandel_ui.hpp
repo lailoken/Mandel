@@ -128,6 +128,8 @@ private:
     float pending_zoom_offset_y_;
     // Accumulated zoom factor from displayed bounds (reset at start of each zoom sequence)
     float accumulated_zoom_factor_;
+    // Prevents cascading panic re-triggers within a single render cycle
+    bool panic_pan_triggered_;
     enum class RenderSource { PAN, ZOOM, OTHER };
     RenderSource render_source_;
 

@@ -367,7 +367,7 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
                 // UI doesn't block on pixel writes; generation check bails out stale renders
                 if (pixels_data == nullptr)
                 {
-                    DEBUG_PRINTF("[ERROR] Writing pixel: pixels_data is null! renderer=%p, idx=%zu\n", static_cast<void*>(self), idx);
+                    DEBUG_PRINTF("[ERROR] Writing pixel: pixels_data is null! renderer=%p, idx=%zu\n", static_cast<void*>(self.get()), idx);
                     return iter;
                 }
                 // Write pixel - pixels_data was captured at lambda creation time, so it's safe
@@ -387,7 +387,7 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
             }
             else
             {
-                DEBUG_PRINTF("[ERROR] Bounds check failed: idx=%zu, pixels_size=%zu, renderer=%p\n", idx, pixels_size, static_cast<void*>(self));
+                DEBUG_PRINTF("[ERROR] Bounds check failed: idx=%zu, pixels_size=%zu, renderer=%p\n", idx, pixels_size, static_cast<void*>(self.get()));
             }
         }
 

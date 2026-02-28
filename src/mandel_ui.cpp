@@ -46,6 +46,7 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
       pending_zoom_offset_x_(0.0f),
       pending_zoom_offset_y_(0.0f),
       accumulated_zoom_factor_(1.0f),
+      panic_pan_triggered_(false),
       render_source_(RenderSource::OTHER),
       worker_(nullptr),
       thread_pool_(thread_pool),
@@ -199,34 +200,42 @@ void MandelUI::handle_input()
     // Don't pan when ImGui is using the mouse (e.g. slider drag, combo box)
     bool imgui_wants_mouse = io.WantCaptureMouse;
 
-    // Panning (drag): only when mouse is on background, not on any window, and not captured by a widget
+    // Panning (drag): accumulate display_offset while dragging
     if (io.MouseDown[0] && mouse_over_viewport && !control_window_hovered && !imgui_wants_mouse)
     {
         if (!is_dragging_)
-        {
             is_dragging_ = true;
-        }
 
         display_offset_x_ += io.MouseDelta.x;
         display_offset_y_ += io.MouseDelta.y;
-
-        // Threshold to start new render (use overscan margin; overscan is always on)
-        // Trigger early (40% of margin) to give renderer time to finish before we hit the edge
-        float start_threshold_x = static_cast<float>(overscan_viewport_.margin_x()) * 0.4f;
-        float start_threshold_y = static_cast<float>(overscan_viewport_.margin_y()) * 0.4f;
-
-        // Only trigger a new pan when over threshold and no render in progress (avoids runaway)
-        if ((std::abs(display_offset_x_) > start_threshold_x || std::abs(display_offset_y_) > start_threshold_y) && !render_pending_)
-        {
-            handle_pan(display_offset_x_, display_offset_y_);
-        }
     }
     else
     {
         if (is_dragging_)
-        {
             is_dragging_ = false;
-        }
+    }
+
+    // Pan trigger checks run every frame (not just while dragging) so that a completed render
+    // that leaves display_offset beyond the limit is corrected even after the mouse is released.
+    float start_threshold_x = static_cast<float>(overscan_viewport_.margin_x()) * 0.4f;
+    float start_threshold_y = static_cast<float>(overscan_viewport_.margin_y()) * 0.4f;
+
+    if ((std::abs(display_offset_x_) > start_threshold_x || std::abs(display_offset_y_) > start_threshold_y) && !render_pending_)
+    {
+        handle_pan(display_offset_x_, display_offset_y_);
+    }
+
+    // Panic re-trigger: if a PAN render is in progress but display_offset is approaching the
+    // overscan limit, restart it from the current position.  Old render tasks abort immediately
+    // on the next generation check (within a few rows), so there is essentially no wasted work.
+    // The flag prevents cascading re-triggers within a single render cycle.
+    float panic_threshold_x = static_cast<float>(overscan_viewport_.margin_x()) * 0.85f;
+    float panic_threshold_y = static_cast<float>(overscan_viewport_.margin_y()) * 0.85f;
+    if (render_pending_ && render_source_ == RenderSource::PAN && !panic_pan_triggered_ &&
+        (std::abs(display_offset_x_) >= panic_threshold_x || std::abs(display_offset_y_) >= panic_threshold_y))
+    {
+        panic_pan_triggered_ = true;
+        handle_pan(display_offset_x_, display_offset_y_);
     }
 
     // Mouse wheel zoom: only when mouse is over viewport and not over any ImGui window
@@ -591,6 +600,7 @@ void MandelUI::draw()
     {
         update_textures();
         render_pending_ = false;
+        panic_pan_triggered_ = false;
     }
 
     ImGuiIO& io = ImGui::GetIO();
