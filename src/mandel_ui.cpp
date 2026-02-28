@@ -409,7 +409,6 @@ void MandelUI::convert_display_offset_on_swap()
         DEBUG_PRINTF("  Calculated Shift Pixels: (%.2f, %.2f)\n", px_shift_x, px_shift_y);
     }
 
-    display_offset_x_ += px_shift_x;
     // Y axis: PanY > 0 -> Viewport moves Down -> Texture moves Up relative to Viewport (Wait. Texture stays fixed in Complex).
     // Feature moves UP in Texture Space (smaller Y index)? No.
     // Top-Down: Y=0 is Y_MAX. Y=Height is Y_MIN.
