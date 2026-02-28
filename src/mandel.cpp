@@ -64,13 +64,16 @@ CanvasMetrics::CanvasMetrics(int w, int h, FloatType xmin, FloatType xmax, Float
     , y_max(ymax)
 {
     pixel_to_x = (x_max - x_min) / width;
-    pixel_to_y = (y_max - y_min) / height;
+    // Invert Y axis: Screen Y goes down, Complex Y goes up.
+    // So pixel 0 (top) corresponds to y_max. pixel height (bottom) corresponds to y_min.
+    pixel_to_y = (y_min - y_max) / height;
 }
 
 ::std::complex<FloatType> CanvasMetrics::canvas_to_complex(int32_t x_pos, int32_t y_pos) const
 {
     FloatType cx = x_min + pixel_to_x * x_pos;
-    FloatType cy = y_min + pixel_to_y * y_pos;
+    // Start from y_max (Top)
+    FloatType cy = y_max + pixel_to_y * y_pos;
     return ::std::complex<FloatType>(cx, cy);
 }
 
@@ -183,7 +186,8 @@ void MandelbrotRenderer::generate_mandelbrot_direct(int32_t x_min, int32_t x_max
     const FloatType pixel_to_x = metrics_.pixel_to_x;
     const FloatType pixel_to_y = metrics_.pixel_to_y;
     const FloatType x_min_coord = metrics_.x_min;
-    const FloatType y_min_coord = metrics_.y_min;
+    // Use y_max as base because pixel_to_y is negative (Top-Down)
+    const FloatType y_base_coord = metrics_.y_max;
     const int max_iter = max_iterations_;
     const ColorScheme& palette = ColorScheme::get_instance();
     const size_t palette_size = palette.palette.size();
@@ -206,7 +210,7 @@ void MandelbrotRenderer::generate_mandelbrot_direct(int32_t x_min, int32_t x_max
 
         // Calculate row_base using size_t to prevent overflow
         const size_t row_base = static_cast<size_t>(y_pos) * width_4;
-        const FloatType cy = y_min_coord + pixel_to_y * y_pos;
+        const FloatType cy = y_base_coord + pixel_to_y * y_pos;
 
         for (int32_t x_pos = x_min; x_pos <= x_max; ++x_pos)
         {
@@ -269,7 +273,8 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
     const FloatType pixel_to_x = metrics_.pixel_to_x;
     const FloatType pixel_to_y = metrics_.pixel_to_y;
     const FloatType x_min_coord = metrics_.x_min;
-    const FloatType y_min_coord = metrics_.y_min;
+    // Use y_max as base because pixel_to_y is negative (Top-Down)
+    const FloatType y_base_coord = metrics_.y_max;
     const int max_iter = max_iterations_;
     const size_t width_4 = static_cast<size_t>(width_) * 4;  // Use size_t to prevent overflow
 
@@ -288,7 +293,7 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
     ThreadPool* thread_pool_ptr = &thread_pool_;           // Capture pointer to thread pool
     const ColorScheme& palette_captured = ColorScheme::get_instance();
     auto fast_process_pixel =
-        [self, pixels_data_captured, pixels_size, pixel_to_x, pixel_to_y, x_min_coord, y_min_coord, max_iter, &palette_captured, width_4, width, height, start_generation, gen_ref](
+        [self, pixels_data_captured, pixels_size, pixel_to_x, pixel_to_y, x_min_coord, y_base_coord, max_iter, &palette_captured, width_4, width, height, start_generation, gen_ref](
             int32_t x_pos, int32_t y_pos) -> int
     {
         // Use captured pixels_data pointer - no need to access self->pixels_.data() again
@@ -300,7 +305,7 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
         }
 
         FloatType cx = x_min_coord + pixel_to_x * x_pos;
-        FloatType cy = y_min_coord + pixel_to_y * y_pos;
+        FloatType cy = y_base_coord + pixel_to_y * y_pos;
 
         FloatType zr = static_cast<FloatType>(0.0);
         FloatType zi = static_cast<FloatType>(0.0);

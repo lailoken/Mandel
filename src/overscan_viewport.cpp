@@ -9,6 +9,7 @@ namespace mandel
 OverscanViewport::OverscanViewport(int viewport_width, int viewport_height)
     : viewport_width_(viewport_width)
     , viewport_height_(viewport_height)
+    , overscan_enabled_(true)
 {
     calculate_margins();
 }
@@ -22,13 +23,31 @@ void OverscanViewport::set_viewport_size(int width, int height)
 
 void OverscanViewport::calculate_margins()
 {
-    // Calculate margins (~1/6 viewport, rounded up)
-    margin_x_ = (viewport_width_ + 5) / 6;
-    margin_y_ = (viewport_height_ + 5) / 6;
+    if (overscan_enabled_)
+    {
+        // Calculate margins (~1/6 viewport, rounded up)
+        margin_x_ = (viewport_width_ + 5) / 6;
+        margin_y_ = (viewport_height_ + 5) / 6;
+    }
+    else
+    {
+        // No overscan - margins are 0
+        margin_x_ = 0;
+        margin_y_ = 0;
+    }
     
     // Canvas dimensions
     canvas_width_ = viewport_width_ + 2 * margin_x_;
     canvas_height_ = viewport_height_ + 2 * margin_y_;
+}
+
+void OverscanViewport::set_overscan_enabled(bool enabled)
+{
+    if (overscan_enabled_ != enabled)
+    {
+        overscan_enabled_ = enabled;
+        calculate_margins();
+    }
 }
 
 OverscanViewport::TextureCoords OverscanViewport::calculate_texture_coords(

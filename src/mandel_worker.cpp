@@ -7,7 +7,7 @@
 #include <thread>
 
 #ifdef _DEBUG
-#define DEBUG_PRINTF(...) printf(__VA_ARGS__)
+#define DEBUG_PRINTF(...) ((void)0)
 #else
 #define DEBUG_PRINTF(...) ((void)0)
 #endif
@@ -17,57 +17,23 @@ namespace mandel
 
 MandelWorker::MandelWorker(int canvas_width, int canvas_height,
                            std::atomic<unsigned int>& current_generation,
-                           FloatType& canvas_x_min,
-                           FloatType& canvas_x_max,
-                           FloatType& canvas_y_min,
-                           FloatType& canvas_y_max,
+                           FloatType canvas_x_min,
+                           FloatType canvas_x_max,
+                           FloatType canvas_y_min,
+                           FloatType canvas_y_max,
                            ThreadPool& thread_pool)
-    : canvas_width_(canvas_width)
-    , canvas_height_(canvas_height)
-    , current_generation_(current_generation)
-    , canvas_x_min_(canvas_x_min)
-    , canvas_x_max_(canvas_x_max)
-    , canvas_y_min_(canvas_y_min)
-    , canvas_y_max_(canvas_y_max)
+    : WorkerBase(canvas_width, canvas_height, current_generation, canvas_x_min, canvas_x_max, canvas_y_min, canvas_y_max)
     , thread_pool_(thread_pool)
     , max_iterations_(512)
+    , start_generation_(0)
 {
-    start_generation_ = current_generation_.load();
-    // Initialize canvas buffer
-    size_t pixel_count = static_cast<size_t>(canvas_width) * static_cast<size_t>(canvas_height) * 4;
-    canvas_.resize(pixel_count);
-    // Initialize to black with alpha=255
-    std::memset(canvas_.data(), 0, pixel_count);
-    for (size_t i = 3; i < pixel_count; i += 4)
-    {
-        canvas_[i] = 255; // Alpha
-    }
-    // Renderer will be created in start_render() with all parameters
-}
-
-void MandelWorker::init(int canvas_width, int canvas_height)
-{
-    canvas_width_ = canvas_width;
-    canvas_height_ = canvas_height;
-    // Resize canvas buffer
-    size_t pixel_count = static_cast<size_t>(canvas_width) * static_cast<size_t>(canvas_height) * 4;
-    size_t old_size = canvas_.size();
-    canvas_.resize(pixel_count);
-    // Initialize new pixels to black with alpha=255
-    if (pixel_count > old_size)
-    {
-        std::memset(canvas_.data() + old_size, 0, pixel_count - old_size);
-        for (size_t i = old_size + 3; i < pixel_count; i += 4)
-        {
-            canvas_[i] = 255; // Alpha
-        }
-    }
+    // Canvas buffer is initialized in WorkerBase constructor
     // Renderer will be created in start_render() with all parameters
 }
 
 void MandelWorker::start_render()
 {
-    // Capture start generation
+    // Capture start generation for this render
     start_generation_ = current_generation_.load();
     
     // Get current canvas bounds (capture snapshot - no lock needed)
@@ -109,6 +75,24 @@ void MandelWorker::start_render()
     
     DEBUG_PRINTF("[WORKER] start_render: width=%d, height=%d, bounds=(%.20Lf, %.20Lf, %.20Lf, %.20Lf), max_iter=%d\n",
            canvas_width_, canvas_height_, x_min, x_max, y_min, y_max, max_iterations_);
+}
+
+bool MandelWorker::try_complete_render()
+{
+    if (!renderer_)
+        return false;
+    if (start_generation_ != current_generation_.load())
+        return false;
+    if (!thread_pool_.is_idle())
+        return false;
+
+    // Merge renderer buffer into canvas (same as wait_and_get_buffer but non-blocking)
+    std::lock_guard<std::mutex> lock(canvas_mutex_);
+    const std::vector<unsigned char>& renderer_pixels = renderer_->get_pixels();
+    if (renderer_pixels.size() != canvas_.size())
+        return false;
+    std::memcpy(canvas_.data(), renderer_pixels.data(), canvas_.size());
+    return true;
 }
 
 bool MandelWorker::wait_and_get_buffer(std::vector<unsigned char>& target_buffer)

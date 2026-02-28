@@ -93,12 +93,17 @@ int main(int /* argc */, char* /* argv */[])
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     // Create thread pool (shared by all components)
-    ThreadPool thread_pool(std::thread::hardware_concurrency());
+    // Leave one core free for the UI thread to ensure smooth rendering/input handling
+    unsigned int num_threads = std::thread::hardware_concurrency();
+    if (num_threads > 1)
+    {
+        num_threads -= 1;
+    }
+    ThreadPool thread_pool(num_threads);
 
     // Create and set up UI (handles overscan, user input, texture management)
     // Platform-specific texture operations are handled via callbacks
-    // Thread pool is passed to UI, which creates and manages its own worker
-    mandel::MandelUI ui(update_texture_opengl, delete_texture_opengl, &thread_pool);
+    mandel::MandelUI ui(update_texture_opengl, delete_texture_opengl, thread_pool);
 
     // Main loop
     bool done = false;
@@ -116,6 +121,20 @@ int main(int /* argc */, char* /* argv */[])
             {
                 done = true;
             }
+        }
+
+        // FPS Counter
+        static Uint32 last_time = SDL_GetTicks();
+        static int frame_count = 0;
+        frame_count++;
+        Uint32 current_time = SDL_GetTicks();
+        if (current_time - last_time >= 1000)
+        {
+            char title[256];
+            sprintf(title, "Mandelbrot Explorer - FPS: %d", frame_count);
+            SDL_SetWindowTitle(window, title);
+            frame_count = 0;
+            last_time = current_time;
         }
 
         // Start the Dear ImGui frame

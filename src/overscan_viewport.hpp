@@ -13,6 +13,10 @@ public:
     // Update viewport dimensions (recalculates margins and canvas)
     void set_viewport_size(int width, int height);
     
+    // Enable/disable overscan (when disabled, margins are 0)
+    void set_overscan_enabled(bool enabled);
+    bool get_overscan_enabled() const { return overscan_enabled_; }
+    
     // Get dimensions
     int viewport_width() const { return viewport_width_; }
     int viewport_height() const { return viewport_height_; }
@@ -68,6 +72,7 @@ private:
     int margin_y_;
     int canvas_width_;
     int canvas_height_;
+    bool overscan_enabled_;
 };
 
 } // namespace mandel
