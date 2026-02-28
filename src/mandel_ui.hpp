@@ -126,6 +126,8 @@ private:
     // Pending zoom display offset (target display_offset when zoom render completes)
     float pending_zoom_offset_x_;
     float pending_zoom_offset_y_;
+    // Accumulated zoom factor from displayed bounds (reset at start of each zoom sequence)
+    float accumulated_zoom_factor_;
     enum class RenderSource { PAN, ZOOM, OTHER };
     RenderSource render_source_;
 
