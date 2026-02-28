@@ -103,6 +103,7 @@ private:
 
     // State
     std::atomic<unsigned int> render_generation_;
+    unsigned int displayed_generation_; // Generation of the currently displayed texture
     FloatType canvas_x_min_;
     FloatType canvas_x_max_;
     FloatType canvas_y_min_;
@@ -117,6 +118,12 @@ private:
     FloatType render_start_canvas_x_max_;
     FloatType render_start_canvas_y_min_;
     FloatType render_start_canvas_y_max_;
+
+    // Pending Pan Pixels (exact integer shift from handle_pan)
+    long pending_pan_pixels_x_;
+    long pending_pan_pixels_y_;
+    enum class RenderSource { PAN, OTHER };
+    RenderSource render_source_;
 
     // Worker (MandelWorker for real Mandelbrot rendering)
     std::unique_ptr<WorkerBase> worker_;

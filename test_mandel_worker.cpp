@@ -33,7 +33,6 @@ int test_worker_basic()
         thread_pool
     );
     
-    worker.init(width, height);
     worker.set_max_iterations(100);
     
     printf("[TEST] Starting render...\n");
@@ -76,7 +75,7 @@ int test_worker_basic()
     }
     
     // Check that get_pixels() returns the same data
-    const unsigned char* pixels_ptr = worker.get_pixels();
+    const unsigned char* pixels_ptr = worker.canvas_.data();
     if (pixels_ptr == nullptr)
     {
         printf("[TEST] ERROR: get_pixels() returned nullptr\n");
@@ -126,7 +125,6 @@ int test_worker_generation_cancellation()
         thread_pool
     );
     
-    worker.init(width, height);
     worker.set_max_iterations(100);
     
     printf("[TEST] Starting render with generation 0...\n");
@@ -179,7 +177,6 @@ int test_worker_translation()
         thread_pool
     );
     
-    worker.init(width, height);
     worker.set_max_iterations(100);
     
     // Render initial view
@@ -245,7 +242,6 @@ int test_worker_translation()
         thread_pool
     );
     
-    worker_translated.init(width, height);
     worker_translated.set_max_iterations(100);
     
     printf("[TEST] Rendering translated view...\n");

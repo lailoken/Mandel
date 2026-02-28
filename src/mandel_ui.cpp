@@ -28,6 +28,7 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
       display_offset_y_(0.0f),
       is_dragging_(false),
       render_generation_(0),
+      displayed_generation_(0),
       canvas_x_min_(-2.0L),
       canvas_x_max_(0.5L),
       canvas_y_min_(-1.125L),
@@ -40,6 +41,9 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
       render_start_canvas_x_max_(0.5L),
       render_start_canvas_y_min_(-1.125L),
       render_start_canvas_y_max_(1.125L),
+      pending_pan_pixels_x_(0),
+      pending_pan_pixels_y_(0),
+      render_source_(RenderSource::OTHER),
       worker_(nullptr),
       thread_pool_(thread_pool),
       render_pending_(false),
@@ -148,6 +152,7 @@ void MandelUI::handle_resize(int viewport_width, int viewport_height)
         overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(), render_generation_,
         canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, thread_pool_);
     worker_->set_max_iterations(max_iterations_);
+    render_source_ = RenderSource::OTHER;
     start_render();
 }
 
@@ -224,15 +229,6 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
         displayed_texture_canvas_x_max_ = canvas_x_max_;
         displayed_texture_canvas_y_min_ = canvas_y_min_;
         displayed_texture_canvas_y_max_ = canvas_y_max_;
-        DEBUG_PRINTF("  Saved displayed bounds: x=[%.6Lf, %.6Lf], y=[%.6Lf, %.6Lf]\n", 
-               displayed_texture_canvas_x_min_, displayed_texture_canvas_x_max_,
-               displayed_texture_canvas_y_min_, displayed_texture_canvas_y_max_);
-    }
-    else
-    {
-        DEBUG_PRINTF("  Render pending, keeping existing displayed bounds: x=[%.6Lf, %.6Lf], y=[%.6Lf, %.6Lf]\n", 
-               displayed_texture_canvas_x_min_, displayed_texture_canvas_x_max_,
-               displayed_texture_canvas_y_min_, displayed_texture_canvas_y_max_);
     }
 
     // 2. Get viewport bounds for what's actually on screen (use displayed when render pending)
@@ -258,8 +254,31 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
     // See DRAGGING_REDESIGN.md and plan: screen (x right, y down) vs Mandel (x right, y up).
     FloatType pan_x = -display_offset_x * screen_to_x;
     FloatType pan_y = display_offset_y * screen_to_y;
+    
+    // Snap pan to nearest integer pixel size to avoid sub-pixel shimmer during continuous panning
+    // Calculate pixel size in complex units
+    FloatType canvas_width_f = static_cast<FloatType>(overscan_viewport_.canvas_width());
+    FloatType canvas_height_f = static_cast<FloatType>(overscan_viewport_.canvas_height());
+    FloatType pixel_size_x = (canvas_x_max_ - canvas_x_min_) / canvas_width_f;
+    FloatType pixel_size_y = (canvas_y_max_ - canvas_y_min_) / canvas_height_f; // Magnitude depends on min/max order
+    
+    // Snap to nearest multiple of pixel size
+    // Calculate exact integer pixels to avoid float round-trip errors
+    FloatType raw_pixels_x = pan_x / pixel_size_x;
+    FloatType raw_pixels_y = pan_y / pixel_size_y;
+    long pan_pixels_x = std::lround(raw_pixels_x);
+    long pan_pixels_y = std::lround(raw_pixels_y);
+    
+    // Store exact integer shift for update_textures (prevents drift/jump)
+    pending_pan_pixels_x_ = pan_pixels_x;
+    pending_pan_pixels_y_ = pan_pixels_y;
+    render_source_ = RenderSource::PAN;
+    
+    // Use exact integer pixels for pan
+    pan_x = static_cast<FloatType>(pan_pixels_x) * pixel_size_x;
+    pan_y = static_cast<FloatType>(pan_pixels_y) * pixel_size_y;
 
-    DEBUG_PRINTF("  Pan complex: (%.6Lf, %.6Lf)\n", pan_x, pan_y);
+    DEBUG_PRINTF("  Pan snapped: (%.6Lf, %.6Lf) Pixels: (%ld, %ld)\n", pan_x, pan_y, pan_pixels_x, pan_pixels_y);
 
     // Calculate new viewport bounds
     viewport_x_min += pan_x;
@@ -280,10 +299,6 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
     render_start_canvas_x_max_ = new_canvas_x_max;
     render_start_canvas_y_min_ = new_canvas_y_min;
     render_start_canvas_y_max_ = new_canvas_y_max;
-
-    DEBUG_PRINTF("  New render bounds: x=[%.6Lf, %.6Lf], y=[%.6Lf, %.6Lf]\n", 
-           render_start_canvas_x_min_, render_start_canvas_x_max_,
-           render_start_canvas_y_min_, render_start_canvas_y_max_);
 
     // 5. Do NOT reset display_offset here: we keep drawing the old texture with the current
     //    offset until the new texture is ready, then convert_display_offset_on_swap() sets
@@ -348,49 +363,111 @@ bool MandelUI::compute_swap_conversion(
 void MandelUI::convert_display_offset_on_swap()
 {
     DEBUG_PRINTF("convert_display_offset_on_swap: OLD offset=(%.2f, %.2f)\n", display_offset_x_, display_offset_y_);
-    
-    // Convert display_offset from old texture (displayed_*) to new (render_start_*) so the same
-    // complex coordinate stays under the viewport center (per DRAGGING_REDESIGN.md).
-    int vp_w = overscan_viewport_.viewport_width();
-    int vp_h = overscan_viewport_.viewport_height();
+
     int cw = overscan_viewport_.canvas_width();
     int ch = overscan_viewport_.canvas_height();
-    int mx = overscan_viewport_.margin_x();
-    int my = overscan_viewport_.margin_y();
 
-    // 1. Point of interest: Center of the viewport
-    float screen_x = static_cast<float>(vp_w) * 0.5f;
-    float screen_y = static_cast<float>(vp_h) * 0.5f;
+    // Direct shift logic based on bound changes
+    // This avoids round-trip precision errors and drift
+    // The new texture is shifted relative to old texture by (new_min - old_min)
+    
+    float px_shift_x = 0.0f;
+    float px_shift_y = 0.0f;
 
-    // 2. Map to canvas pixel in OLD texture (displayed bounds)
-    // Texture Pixel = Margin + Screen Pixel - Display Offset
-    // (Dragging Right -> Offset > 0 -> See Left -> Smaller Index -> Margin + Screen - Offset)
-    float canvas_px_old = static_cast<float>(mx) + screen_x - display_offset_x_;
-    float canvas_py_old = static_cast<float>(my) + screen_y - display_offset_y_;
+    if (render_source_ == RenderSource::PAN)
+    {
+        // Use exact integer pixels calculated in handle_pan
+        // This avoids ANY floating point drift or jumps
+        px_shift_x = static_cast<float>(pending_pan_pixels_x_);
+        px_shift_y = static_cast<float>(pending_pan_pixels_y_);
+        DEBUG_PRINTF("  Using Pending Pixels: (%ld, %ld)\n", pending_pan_pixels_x_, pending_pan_pixels_y_);
+    }
+    else
+    {
+        // Direct shift logic based on bound changes
+        // This avoids round-trip precision errors and drift
+        // The new texture is shifted relative to old texture by (new_min - old_min)
+        
+        FloatType shift_x = render_start_canvas_x_min_ - displayed_texture_canvas_x_min_;
+        // For Y, use y_max as anchor (Top-Down, y=0 is y_max)
+        FloatType shift_y = render_start_canvas_y_max_ - displayed_texture_canvas_y_max_;
+    
+        FloatType pixel_size_x = (displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_) / static_cast<FloatType>(cw);
+        // pixel_size_y is magnitude (max-min)/height
+        FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / static_cast<FloatType>(ch);
+    
+        // Calculate shift in pixels
+        // We expect this to be close to integer because handle_pan snaps bounds
+        // USE ROUND to avoid truncation errors (e.g. 0.999 -> 0)
+        px_shift_x = static_cast<float>(std::round(shift_x / pixel_size_x));
+        
+        // shift_y: NewMax - OldMax.
+        // If PanY > 0 (Drag Down). NewMax > OldMax. shift_y > 0.
+        // px_shift_y > 0.
+        px_shift_y = static_cast<float>(std::round(shift_y / pixel_size_y));
+        
+        DEBUG_PRINTF("  Calculated Shift Pixels: (%.2f, %.2f)\n", px_shift_x, px_shift_y);
+    }
 
-    // 3. Convert to complex coordinate using old texture bounds
-    FloatType old_x_range = displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_;
-    FloatType old_y_range = displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_;
-    FloatType complex_x = displayed_texture_canvas_x_min_ +
-                          static_cast<FloatType>(canvas_px_old) / static_cast<FloatType>(cw) * old_x_range;
-    FloatType complex_y = displayed_texture_canvas_y_max_ -
-                          static_cast<FloatType>(canvas_py_old) / static_cast<FloatType>(ch) * old_y_range;
-
-    DEBUG_PRINTF("  Center complex: (%.6Lf, %.6Lf) [using OLD bounds]\n", complex_x, complex_y);
-
-    // 4. Convert complex to canvas pixel in NEW texture (render_start bounds)
-    FloatType new_x_range = render_start_canvas_x_max_ - render_start_canvas_x_min_;
-    FloatType new_y_range = render_start_canvas_y_max_ - render_start_canvas_y_min_;
-    float canvas_px_new = static_cast<float>((complex_x - render_start_canvas_x_min_) / new_x_range * cw);
-    float canvas_py_new = static_cast<float>((render_start_canvas_y_max_ - complex_y) / new_y_range * ch);
-
-    DEBUG_PRINTF("  New canvas pixel: (%.2f, %.2f)\n", canvas_px_new, canvas_py_new);
-
-    // 5. New display_offset
-    // We want: canvas_px_new = Margin + Screen - New Offset
-    // New Offset = Margin + Screen - canvas_px_new
-    display_offset_x_ = static_cast<float>(mx) + screen_x - canvas_px_new;
-    display_offset_y_ = static_cast<float>(my) + screen_y - canvas_py_new;
+    display_offset_x_ += px_shift_x;
+    // Y axis: PanY > 0 -> Viewport moves Down -> Texture moves Up relative to Viewport (Wait. Texture stays fixed in Complex).
+    // Feature moves UP in Texture Space (smaller Y index)? No.
+    // Top-Down: Y=0 is Y_MAX. Y=Height is Y_MIN.
+    // PanY > 0. Viewport Y_MAX increases.
+    // Y_MAX (New) > Y_MAX (Old).
+    // Feature (Absolute Y).
+    // Index_Old = (Y_MAX_Old - Y) / Size.
+    // Index_New = (Y_MAX_New - Y) / Size.
+    // Y_MAX_New = Y_MAX_Old + Shift.
+    // Index_New = (Y_MAX_Old + Shift - Y) / Size = Index_Old + (Shift/Size).
+    // So Index INCREASES.
+    // Feature moves DOWN in Texture Space (larger Y index).
+    // We display New Texture. Feature is at Index+Shift.
+    // We want Feature at ScreenY.
+    // ScreenY = Margin + Index_New + Offset_New. (Y increases Down).
+    // ScreenY = Margin + (Index_Old + Shift) + Offset_New.
+    // Old ScreenY = Margin + Index_Old + Offset_Old.
+    // Margin + Index_Old + Shift + Offset_New = Margin + Index_Old + Offset_Old.
+    // Shift + Offset_New = Offset_Old.
+    // Offset_New = Offset_Old - Shift.
+    // So display_offset_y_ -= px_shift_y.
+    
+    // Check PanY > 0 (Drag Down). Offset > 0.
+    // Shift > 0.
+    // Offset_New < Offset_Old.
+    // If we dragged Down (Offset 50). Panned Down (Shift 50).
+    // Offset_New should be 0.
+    // 50 - 50 = 0.
+    // Correct!
+    
+    // Check X axis.
+    // PanX > 0 (Drag Left? No. PanX > 0 -> Viewport moves Right).
+    // Drag Left -> Offset < 0.
+    // PanX = -Offset = Positive.
+    // ShiftX > 0.
+    // Index_Old = (X - X_MIN_Old) / Size.
+    // Index_New = (X - X_MIN_New) / Size = (X - (X_MIN_Old + Shift)) / Size = Index_Old - Shift.
+    // ScreenX = Margin + Index_New - Offset_New. (Wait. X formula: M + S - O? No. M + S - O).
+    // Let's check calculate_draw_info logic.
+    // texture_draw_x = draw_x + texture_offset_x.
+    // It shifts Texture.
+    // If Offset > 0. Texture shifts Right.
+    // ScreenX of Feature = TextureX + Offset.
+    // TextureX_New = TextureX_Old - Shift.
+    // ScreenX = (TextureX_Old - Shift) + Offset_New.
+    // Old ScreenX = TextureX_Old + Offset_Old.
+    // TextureX_Old - Shift + Offset_New = TextureX_Old + Offset_Old.
+    // Offset_New - Shift = Offset_Old.
+    // Offset_New = Offset_Old + Shift.
+    
+    // Verify Drag Left (Offset < 0).
+    // PanX > 0. Shift > 0.
+    // Offset_New = Offset_Old + Shift.
+    // -50 + 50 = 0.
+    // Correct!
+    
+    display_offset_x_ += px_shift_x;
+    display_offset_y_ -= px_shift_y; // Confirmed subtraction for Y
     
     DEBUG_PRINTF("  NEW offset=(%.2f, %.2f)\n", display_offset_x_, display_offset_y_);
 }
@@ -401,6 +478,38 @@ void MandelUI::update_textures()
     {
         return;
     }
+
+    // Check if we are swapping a redundant texture (same generation as already displayed)
+    // This prevents resetting the display_offset accumulation when the render finishes instantly or redundantly
+    // Use static_cast since we know we always create MandelWorker (except in tests with mocks, but we handle that)
+    auto* mandel_worker = static_cast<MandelWorker*>(worker_.get());
+    if (mandel_worker && mandel_worker->get_start_generation() <= displayed_generation_)
+    {
+        DEBUG_PRINTF("update_textures: skipping redundant swap (start_gen=%u <= displayed_gen=%u)\n", 
+               mandel_worker->get_start_generation(), displayed_generation_);
+        return;
+    }
+
+    // Also check if the new texture bounds are identical to the displayed bounds
+    // This handles cases where a render was triggered (e.g. by resize) but resulted in the same complex bounds
+    // Swapping in this case would reset display_offset and cause a "snap back" visual artifact
+    // BUT we must allow the swap if the current texture is empty (first render), otherwise we get a blank screen
+    if (texture_front_ != 0 &&
+        std::abs(render_start_canvas_x_min_ - displayed_texture_canvas_x_min_) < 1e-9 &&
+        std::abs(render_start_canvas_x_max_ - displayed_texture_canvas_x_max_) < 1e-9 &&
+        std::abs(render_start_canvas_y_min_ - displayed_texture_canvas_y_min_) < 1e-9 &&
+        std::abs(render_start_canvas_y_max_ - displayed_texture_canvas_y_max_) < 1e-9)
+    {
+        DEBUG_PRINTF("update_textures: skipping redundant swap (bounds match)\n");
+        displayed_generation_ = mandel_worker ? mandel_worker->get_start_generation() : render_generation_.load();
+        return;
+    }
+
+    displayed_generation_ = mandel_worker ? mandel_worker->get_start_generation() : render_generation_.load();
+
+    DEBUG_PRINTF("update_textures: SWAPPING (start_gen=%u, displayed_gen=%u -> %u)\n", 
+           mandel_worker ? mandel_worker->get_start_generation() : 0, 
+           displayed_generation_, displayed_generation_);
 
     // Convert display_offset from old texture to new so same complex point stays under mouse
     convert_display_offset_on_swap();
@@ -547,6 +656,7 @@ void MandelUI::apply_view_state(const ViewState& state)
         overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(), render_generation_,
         canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, thread_pool_);
     worker_->set_max_iterations(max_iterations_);
+    render_source_ = RenderSource::OTHER;
     start_render();
 }
 

@@ -40,6 +40,7 @@ public:
 
     // Get parameters (needed for UI)
     int get_max_iterations() const { return max_iterations_; }
+    unsigned int get_start_generation() const { return start_generation_; }
 
 private:
     std::unique_ptr<MandelbrotRenderer> renderer_;  // Created fresh for each render

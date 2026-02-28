@@ -33,9 +33,9 @@ bool test_swap_preserves_mouse_coordinate()
     FloatType mouse_complex_x_after, mouse_complex_y_after;
     
     bool result = mandel::MandelUITestHelper::test_swap_calculation(
-        displayed_texture_canvas_x_min, displayed_texture_canvas_x_max,
+           displayed_texture_canvas_x_min, displayed_texture_canvas_x_max,
         displayed_texture_canvas_y_min, displayed_texture_canvas_y_max,
-        render_start_canvas_x_min, render_start_canvas_x_max,
+           render_start_canvas_x_min, render_start_canvas_x_max,
         render_start_canvas_y_min, render_start_canvas_y_max,
         display_offset_x, display_offset_y,
         viewport_width, viewport_height,

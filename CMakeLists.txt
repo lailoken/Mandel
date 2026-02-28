@@ -334,6 +334,7 @@ add_executable(test_translation_swap
     src/mandel_worker.cpp
     src/mandel.cpp
     src/thread_pool.cpp
+    src/dummy_worker.cpp
     src/config.cpp
     src/mandel_control.cpp
     ${IMGUI_SOURCES}
