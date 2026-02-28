@@ -553,7 +553,16 @@ void MandelUI::draw()
 
     if (texture_front_ != 0)
     {
-        OverscanViewport::DrawInfo draw_info = overscan_viewport_.calculate_draw_info(viewport->Pos.x, viewport->Pos.y, display_offset_x_, display_offset_y_, 1.0f, 0.0f, 0.0f);
+        // Snap display offset to integer pixels for drawing to avoid sub-pixel shimmer/blur
+        // usage of floor/ceil/round doesn't matter as long as it's consistent
+        // we use floor to be safe
+        float draw_offset_x = std::floor(display_offset_x_);
+        float draw_offset_y = std::floor(display_offset_y_);
+        
+        OverscanViewport::DrawInfo draw_info = overscan_viewport_.calculate_draw_info(
+            viewport->Pos.x, viewport->Pos.y, 
+            draw_offset_x, draw_offset_y, 
+            1.0f, 0.0f, 0.0f);
 
         // Draw grey background
         ImVec2 viewport_min(viewport->Pos.x, viewport->Pos.y);
