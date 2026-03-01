@@ -273,17 +273,6 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
                                            canvas_y_min_, canvas_y_max_,
                                            viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max);
 
-    FloatType viewport_x_range = viewport_x_max - viewport_x_min;
-    FloatType viewport_y_range = viewport_y_max - viewport_y_min;
-    // display_offset is in viewport/screen pixels; convert to complex units (independent of overscan)
-    int vp_w = overscan_viewport_.viewport_width();
-    int vp_h = overscan_viewport_.viewport_height();
-    FloatType screen_to_x = viewport_x_range / static_cast<FloatType>(vp_w);
-    FloatType screen_to_y = viewport_y_range / static_cast<FloatType>(vp_h);
-
-    // Convert display_offset (viewport pixels) to complex plane delta.
-    // See DRAGGING_REDESIGN.md and plan: screen (x right, y down) vs Mandel (x right, y up).
-    
     // Calculate pixel size in complex units
     FloatType canvas_width_f = static_cast<FloatType>(overscan_viewport_.canvas_width());
     FloatType canvas_height_f = static_cast<FloatType>(overscan_viewport_.canvas_height());

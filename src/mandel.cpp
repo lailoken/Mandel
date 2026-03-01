@@ -19,6 +19,42 @@
 namespace mandel
 {
 
+// Hot Mandelbrot pixel computation, templated on the arithmetic type.
+//
+// T = double  at shallow/medium zoom (SSE2, 2-5× faster than x87 long double)
+// T = FloatType (long double) at deep zoom for full 80-bit precision
+//
+// Optimisations vs the original inlined loop:
+//   1. Period-2 bulb and main cardioid early-exit: pixels inside the main body
+//      are classified in ~10 ns instead of max_iter × ~5 ns.
+//   2. zr² and zi² are computed once per step and reused for both the escape
+//      test and the next iterate — saves two multiplications per iteration.
+template<typename T>
+[[nodiscard]] static inline int compute_pixel_iter(T cx, T cy, int max_iter)
+{
+    // Period-2 bulb: centre (-1, 0), radius 0.25  →  |c+1|² < 1/16
+    T bx = cx + T(1);
+    if (bx * bx + cy * cy < T(0.0625)) return max_iter;
+
+    // Main cardioid (sqrt-free form):
+    //   dx = cx - 0.25,  q = dx² + cy²
+    //   c is inside the cardioid iff  q·(q + dx) < ¼·cy²
+    T dx = cx - T(0.25);
+    T q  = dx * dx + cy * cy;
+    if (q * (q + dx) < T(0.25) * cy * cy) return max_iter;
+
+    // Escape-time loop — reuse zr², zi² to save two multiplications per step
+    T zr = 0, zi = 0;
+    for (int i = 0; i < max_iter; ++i)
+    {
+        T zr2 = zr * zr, zi2 = zi * zi;
+        if (zr2 + zi2 > T(4)) return i;
+        zi = T(2) * zr * zi + cy;
+        zr = zr2 - zi2 + cx;
+    }
+    return max_iter;
+}
+
 // ColorScheme implementation
 ColorScheme::ColorScheme(int count)
 {
@@ -163,83 +199,59 @@ int MandelbrotRenderer::compute_mandelbrot(::std::complex<FloatType> c, int max_
 
 void MandelbrotRenderer::generate_mandelbrot_direct(int32_t x_min, int32_t x_max, int32_t y_min, int32_t y_max, unsigned int start_generation, unsigned int /*current_generation*/)
 {
-    // Check if this render has been superseded by a newer one
-    unsigned int current_gen_check = current_generation_ref_->load();
-    if (start_generation != current_gen_check)
-    {
-        return;  // Stale render, exit early
-    }
+    if (start_generation != current_generation_ref_->load()) return;
 
-    // Optimize: precompute frequently used values outside loops
-    const FloatType pixel_to_x = metrics_.pixel_to_x;
-    const FloatType pixel_to_y = metrics_.pixel_to_y;
-    const FloatType x_min_coord = metrics_.x_min;
-    // Use y_max as base because pixel_to_y is negative (Top-Down)
-    const FloatType y_base_coord = metrics_.y_max;
-    const int max_iter = max_iterations_;
-    const ColorScheme& palette = ColorScheme::get_instance();
-    const size_t palette_size = palette.palette.size();
-    const size_t width_4 = static_cast<size_t>(metrics_.width) * 4;  // Use size_t to prevent overflow
-    const FloatType escape_radius_sq = static_cast<FloatType>(4.0);
-    const size_t pixels_size = static_cast<size_t>(metrics_.width) * static_cast<size_t>(metrics_.height) * 4;
+    const FloatType px   = metrics_.pixel_to_x;
+    const FloatType py   = metrics_.pixel_to_y;
+    const FloatType xc   = metrics_.x_min;
+    const FloatType yb   = metrics_.y_max;
+    const int       mi   = max_iterations_;
+    const size_t    w4   = static_cast<size_t>(metrics_.width) * 4;
+    unsigned char*  pd   = pixels_.data();
 
-    // Precompute row base offsets to avoid repeated multiplication
-    for (int32_t y_pos = y_min; y_pos <= y_max; ++y_pos)
+    const ColorScheme& pal  = ColorScheme::get_instance();
+    const size_t  pal_mask  = pal.palette.size() - 1;  // palette size is always 256 (power-of-2)
+
+    // Dispatch to double (SSE2) for shallow/medium zoom, long double (x87) for deep zoom.
+    // At pixel_to_x > 1e-7 (zoom < ~4×10^7) double precision is more than sufficient
+    // and avoids the x87 pipeline which is 2-5× slower than SSE2 on modern CPUs.
+    if (px > FloatType(1e-7))
     {
-        // Check generation periodically to allow early bailout
-        if (y_pos % 16 == 0)  // Check every 16 rows
+        const double px_d = static_cast<double>(px);
+        const double py_d = static_cast<double>(py);
+        const double xc_d = static_cast<double>(xc);
+        const double yb_d = static_cast<double>(yb);
+        for (int32_t y = y_min; y <= y_max; ++y)
         {
-            unsigned int current_gen_check_periodic = current_generation_ref_->load();
-            if (start_generation != current_gen_check_periodic)
+            if (y % 16 == 0 && start_generation != current_generation_ref_->load()) return;
+            const size_t row = static_cast<size_t>(y) * w4;
+            const double cy  = yb_d + py_d * y;
+            for (int32_t x = x_min; x <= x_max; ++x)
             {
-                return;  // Stale render, exit early
+                const int iter = compute_pixel_iter<double>(xc_d + px_d * x, cy, mi);
+                const ColorScheme::Color& c = (iter == mi) ? ColorScheme::black : pal.palette[static_cast<size_t>(iter) & pal_mask];
+                const size_t idx = row + static_cast<size_t>(x) * 4;
+                pd[idx]     = c[0];
+                pd[idx + 1] = c[1];
+                pd[idx + 2] = c[2];
             }
         }
-
-        // Calculate row_base using size_t to prevent overflow
-        const size_t row_base = static_cast<size_t>(y_pos) * width_4;
-        const FloatType cy = y_base_coord + pixel_to_y * y_pos;
-
-        for (int32_t x_pos = x_min; x_pos <= x_max; ++x_pos)
+    }
+    else
+    {
+        for (int32_t y = y_min; y <= y_max; ++y)
         {
-            // Fully inline all operations for maximum performance
-            FloatType cx = x_min_coord + pixel_to_x * x_pos;
-
-            // Inlined compute_mandelbrot
-            FloatType zr = static_cast<FloatType>(0.0);
-            FloatType zi = static_cast<FloatType>(0.0);
-            int iter = max_iter;
-
-            for (int i = 0; i < max_iter; ++i)
+            if (y % 16 == 0 && start_generation != current_generation_ref_->load()) return;
+            const size_t    row = static_cast<size_t>(y) * w4;
+            const FloatType cy  = yb + py * y;
+            for (int32_t x = x_min; x <= x_max; ++x)
             {
-                FloatType magnitude_sq = zr * zr + zi * zi;
-                if (magnitude_sq > escape_radius_sq)
-                {
-                    iter = i;
-                    break;
-                }
-
-                FloatType zr_new = zr * zr - zi * zi + cx;
-                FloatType zi_new = static_cast<FloatType>(2.0) * zr * zi + cy;
-                zr = zr_new;
-                zi = zi_new;
-            }
-
-            // Color lookup and pixel painting
-            // Alpha channel already set to 255 during initialization, only need to set RGB
-            const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette.palette[static_cast<size_t>(iter) % palette_size];
-            // Calculate idx using size_t to prevent overflow
-            size_t idx = row_base + static_cast<size_t>(x_pos) * 4;
-
-            // Bounds check: ensure we can write 4 bytes (idx through idx+3)
-            if (idx + 3 < pixels_size)
-            {
-                // Write pixel directly - generation check already done, no mutex needed
-                // UI doesn't block on pixel writes; generation check bails out stale renders
-                pixels_[idx + 0] = color[0];
-                pixels_[idx + 1] = color[1];
-                pixels_[idx + 2] = color[2];
-                // Alpha channel (idx + 3) already 255, no need to set
+                const int iter = compute_pixel_iter<FloatType>(xc + px * x, cy, mi);
+                const ColorScheme::Color& c = (iter == mi) ? ColorScheme::black : pal.palette[static_cast<size_t>(iter) & pal_mask];
+                const size_t idx = row + static_cast<size_t>(x) * 4;
+                pd[idx]     = c[0];
+                pd[idx + 1] = c[1];
+                pd[idx + 2] = c[2];
             }
         }
     }
@@ -266,131 +278,47 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
     const int max_iter = max_iterations_;
     const size_t width_4 = static_cast<size_t>(metrics_.width) * 4;  // Use size_t to prevent overflow
 
-    // Capture size and dimensions for bounds checking
-    size_t pixels_size = pixels_.size();
-    int width = metrics_.width;
-    int height = metrics_.height;
-
-    // Capture this pointer (shared) - keeps renderer alive
+    // Capture this pointer (shared) - keeps renderer alive for the duration of all tasks
     std::shared_ptr<MandelbrotRenderer> self = shared_from_this();
-    unsigned char* pixels_data_captured = pixels_.data();  // Capture pointer once, at creation time
-    ThreadPool* thread_pool_ptr = &thread_pool_;           // Capture pointer to thread pool
+    unsigned char* pixels_data_captured = pixels_.data();
+    ThreadPool* thread_pool_ptr = &thread_pool_;
     const ColorScheme& palette_captured = ColorScheme::get_instance();
+
+    // Still needed by the flood-fill bounds check below
+    const size_t pixels_size = pixels_.size();
+
+    // Double-dispatch setup: use SSE2 double at shallow zoom, x87 long double at deep zoom
+    const bool   use_double = pixel_to_x > FloatType(1e-7);
+    const double ptx_d = static_cast<double>(pixel_to_x);
+    const double pty_d = static_cast<double>(pixel_to_y);
+    const double xc_d  = static_cast<double>(x_min_coord);
+    const double yb_d  = static_cast<double>(y_base_coord);
+    const size_t pal_mask = palette_captured.palette.size() - 1;  // 255, power-of-2 bitmask
+
     auto fast_process_pixel =
-        [self, pixels_data_captured, pixels_size, pixel_to_x, pixel_to_y, x_min_coord, y_base_coord, max_iter, &palette_captured, width_4, width, height, start_generation, gen_ref](
-            int32_t x_pos, int32_t y_pos) -> int
+        [pixels_data_captured, pixel_to_x, pixel_to_y, x_min_coord, y_base_coord,
+         max_iter, &palette_captured, pal_mask, width_4,
+         start_generation, gen_ref,
+         use_double, ptx_d, pty_d, xc_d, yb_d](int32_t x_pos, int32_t y_pos) -> int
     {
-        // Use captured pixels_data pointer - no need to access self->pixels_.data() again
-        // This avoids the crash if self becomes invalid
-        unsigned char* pixels_data = pixels_data_captured;
-        if (pixels_data == nullptr || pixels_size < 4)
-        {
-            return max_iter;
-        }
+        // One generation check per pixel — provides responsive cancellation without
+        // the 3× per-pixel atomic loads the previous implementation had.
+        if (gen_ref->load(std::memory_order_relaxed) != start_generation) return max_iter;
 
-        FloatType cx = x_min_coord + pixel_to_x * x_pos;
-        FloatType cy = y_base_coord + pixel_to_y * y_pos;
+        int iter;
+        if (use_double)
+            iter = compute_pixel_iter<double>(xc_d + ptx_d * x_pos, yb_d + pty_d * y_pos, max_iter);
+        else
+            iter = compute_pixel_iter<FloatType>(x_min_coord + pixel_to_x * x_pos,
+                                                  y_base_coord + pixel_to_y * y_pos, max_iter);
 
-        FloatType zr = static_cast<FloatType>(0.0);
-        FloatType zi = static_cast<FloatType>(0.0);
-        int iter = max_iter;
-        constexpr FloatType escape_radius_sq = static_cast<FloatType>(4.0);
-
-        for (int i = 0; i < max_iter; ++i)
-        {
-            FloatType magnitude_sq = zr * zr + zi * zi;
-            if (magnitude_sq > escape_radius_sq)
-            {
-                iter = i;
-                break;
-            }
-
-            FloatType zr_new = zr * zr - zi * zi + cx;
-            FloatType zi_new = static_cast<FloatType>(2.0) * zr * zi + cy;
-            zr = zr_new;
-            zi = zi_new;
-        }
-
-        const ColorScheme::Color& color = iter == max_iter ? ColorScheme::black : palette_captured.palette[static_cast<size_t>(iter) % palette_captured.palette.size()];
-
-        // Calculate index with bounds checking
-        if (x_pos < 0 || y_pos < 0 || x_pos >= width || y_pos >= height)
-        {
-            return iter;  // Out of bounds, return without writing
-        }
-
-        // Check generation again before writing - if a new render started, bail out
-        unsigned int current_gen = gen_ref->load();
-        if (start_generation != current_gen)
-        {
-            return iter;  // Stale render, exit early
-        }
-
-        // Use the captured pixels_data - no need to re-access through self
-        // This avoids the crash if self becomes invalid
-        // The pixels_data was captured when the lambda was created, so it's safe to use
-        if (pixels_data == nullptr || pixels_size < 4)
-        {
-            return iter;  // Buffer invalid or too small, cannot write
-        }
-
-        // Calculate index using size_t arithmetic to prevent overflow
-        // width_4 is already size_t, so this calculation is safe
-        // y_pos and x_pos are already validated to be within [0, width) and [0, height)
-        size_t idx = static_cast<size_t>(y_pos) * width_4 + static_cast<size_t>(x_pos) * 4;
-
-        // Bounds check: ensure we can write 4 bytes (idx through idx+3)
-        // Calculate maximum safe index: pixels_size - 4 (to leave room for 4 bytes)
-        // We already checked pixels_size >= 4 above, so this is safe
-        const size_t max_safe_idx = pixels_size - 4;
-        if (idx <= max_safe_idx)
-        {
-            // Final generation check RIGHT before write - buffer might have been invalidated
-            // This is the last chance to bail out before accessing potentially invalid memory
-            unsigned int final_gen_check = gen_ref->load(std::memory_order_acquire);
-            if (start_generation != final_gen_check)
-            {
-                return iter;  // Stale render, exit immediately
-            }
-
-            // Double-check pointer validity (defensive programming)
-            if (pixels_data == nullptr)
-            {
-                return iter;  // Buffer invalidated, exit immediately
-            }
-
-            // Final bounds check: ensure idx + 3 is within bounds
-            // This is redundant but provides extra safety
-            if ((idx + 3) < pixels_size)
-            {
-                // Write pixel directly - all checks passed, safe to write
-                // UI doesn't block on pixel writes; generation check bails out stale renders
-                if (pixels_data == nullptr)
-                {
-                    DEBUG_PRINTF("[ERROR] Writing pixel: pixels_data is null! renderer=%p, idx=%zu\n", static_cast<void*>(self.get()), idx);
-                    return iter;
-                }
-                // Write pixel - pixels_data was captured at lambda creation time, so it's safe
-                pixels_data[idx + 0] = color[0];
-                pixels_data[idx + 1] = color[1];
-                pixels_data[idx + 2] = color[2];
-                // Alpha channel (idx + 3) already 255, no need to set
-#ifdef _DEBUG
-                // Debug: log first few pixels to verify writes
-                static int pixel_write_count = 0;
-                if (pixel_write_count < 10)
-                {
-                    DEBUG_PRINTF("[RENDERER] Wrote pixel at (%d, %d): RGB=(%u, %u, %u), idx=%zu\n", x_pos, y_pos, color[0], color[1], color[2], idx);
-                    pixel_write_count++;
-                }
-#endif
-            }
-            else
-            {
-                DEBUG_PRINTF("[ERROR] Bounds check failed: idx=%zu, pixels_size=%zu, renderer=%p\n", idx, pixels_size, static_cast<void*>(self.get()));
-            }
-        }
-
+        const ColorScheme::Color& color = (iter == max_iter)
+            ? ColorScheme::black
+            : palette_captured.palette[static_cast<size_t>(iter) & pal_mask];
+        const size_t idx = static_cast<size_t>(y_pos) * width_4 + static_cast<size_t>(x_pos) * 4;
+        pixels_data_captured[idx]     = color[0];
+        pixels_data_captured[idx + 1] = color[1];
+        pixels_data_captured[idx + 2] = color[2];
         return iter;
     };
 
