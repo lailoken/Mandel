@@ -303,11 +303,6 @@ void MandelControl::draw()
             ImGui::SameLine();
             std::string new_view_name(new_view_name_buffer);
             std::map<std::string, ViewState>& saved_views = ui_interface_->get_saved_views();
-            bool can_save = !new_view_name.empty() && saved_views.find(new_view_name) == saved_views.end() && ui_interface_ != nullptr;
-            if (!can_save)
-            {
-                ImGui::BeginDisabled();
-            }
             if (ImGui::Button("Save Current View"))
             {
                 // Save current viewport state (not buffer bounds)
@@ -317,16 +312,11 @@ void MandelControl::draw()
                 // Save immediately on manual edit
                 save_views_to_file(saved_views);  // Don't save current view (only named views)
             }
-            if (!can_save)
-            {
-                ImGui::EndDisabled();
-            }
             ImGui::PopItemWidth();
 
             // Table of saved views
             ImGui::Spacing();
 
-            ImGui::BeginDisabled(ui_interface_->is_render_in_progress());
             ImGuiTableFlags table_flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
                                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Hideable | ImGuiTableFlags_NoSavedSettings;
             if (ImGui::BeginTable("SavedViews", 5, table_flags, ImVec2(0, -FLT_MIN)))
@@ -339,14 +329,18 @@ void MandelControl::draw()
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableHeadersRow();
 
+                bool prevent_load = !new_view_name.empty() || saved_views.find(new_view_name) != saved_views.end() || ui_interface_ == nullptr;
+
                 // Pseudo item for reset state (cannot be deleted or set, but can be applied)
                 ImGui::TableNextRow();
                 if (ImGui::TableSetColumnIndex(1))  // Name column - skip the actions column
                 {
+                    ImGui::BeginDisabled(prevent_load);
                     if (ImGui::Selectable("<Initial>", false, ImGuiSelectableFlags_AllowDoubleClick))
                     {
                         ui_interface_->reset_to_initial();
                     }
+                    ImGui::EndDisabled();
                 }
 
                 const char* view_format_str = "%.8f to %.8f";
@@ -394,10 +388,12 @@ void MandelControl::draw()
 
                     if (ImGui::TableNextColumn())  // Name
                     {
+                        ImGui::BeginDisabled(prevent_load);
                         if (ImGui::Selectable(name.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick))
                         {
                             ui_interface_->apply_view_state(state);
                         }
+                        ImGui::EndDisabled();
                     }
 
                     if (ImGui::TableNextColumn())  // Iterations
@@ -430,7 +426,6 @@ void MandelControl::draw()
 
                 ImGui::EndTable();
             }
-            ImGui::EndDisabled();
 
             // Try to apply pending settings if render is ready
             ui_interface_->apply_pending_settings_if_ready();

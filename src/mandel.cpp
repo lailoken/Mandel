@@ -376,18 +376,18 @@ void MandelbrotRenderer::generate_mandelbrot_recurse(int32_t x_min, int32_t x_ma
 
         if (all_same)
         {
-            // make sure we are not zoomed out so far that the entire mandelbrot is inside the bounds:
+            // If the entire Mandelbrot set is inside the view, the interior can have different iteration
+            // counts (e.g. main cardioid, period-2 bulb, interior "atoms") even when the border is
+            // uniform. Do not use the flood-fill shortcut in that case.
+            // Mandelbrot set is contained in ~[-2.25, 0.75] x [-1.25, 1.25]
+            // c_min = top-left (min real, max imag), c_max = bottom-right (max real, min imag)
             auto c_min = metrics_.canvas_to_complex(x_min, y_min);
-            if (c_min.real() <= -1.95 && c_min.imag() <= -1.95)
-            {
-                // if the entire mandelbrot is inside the default bounds, we cannot rely on the flood fill to be correct
-                auto c_max = metrics_.canvas_to_complex(x_max, y_max);
-                if (c_max.real() >= 1.95 || c_max.imag() >= 1.95)
-                {
-                    // if the entire mandelbrot is outside the default bounds, we cannot rely on the flood fill to be correct
-                    all_same = false;
-                }
-            }
+            auto c_max = metrics_.canvas_to_complex(x_max, y_max);
+            constexpr FloatType set_left = -2.25, set_right = 0.75, set_bottom = -1.25, set_top = 1.25;
+            bool entire_set_inside = (c_min.real() <= set_left && c_max.real() >= set_right &&
+                                     c_min.imag() >= set_top && c_max.imag() <= set_bottom);
+            if (entire_set_inside)
+                all_same = false;
         }
 
         if (!all_same && thread_pool_ptr->is_paused())
