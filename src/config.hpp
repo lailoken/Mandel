@@ -10,20 +10,28 @@
 namespace mandel
 {
 
-// Structure to store view state (bounds and iteration count)
+// Structure to store view state (midpoint + zoom)
+// Bounds are derived with 1:1 scale (no stretch): extent follows viewport aspect.
+// For square viewport: half_extent = 2/zoom. For non-square: more extent on the longer axis.
 struct ViewState
 {
-    FloatType x_min;
-    FloatType x_max;
-    FloatType y_min;
-    FloatType y_max;
+    FloatType midpoint_x;
+    FloatType midpoint_y;
+    FloatType zoom;
     int max_iterations;
 
-    ViewState() : x_min(0), x_max(0), y_min(0), y_max(0), max_iterations(0) {}
-    ViewState(FloatType xmin, FloatType xmax, FloatType ymin, FloatType ymax, int max_iter)
-        : x_min(xmin), x_max(xmax), y_min(ymin), y_max(ymax), max_iterations(max_iter)
+    ViewState() : midpoint_x(0), midpoint_y(0), zoom(1), max_iterations(0) {}
+    ViewState(FloatType mid_x, FloatType mid_y, FloatType z, int max_iter)
+        : midpoint_x(mid_x), midpoint_y(mid_y), zoom(z), max_iterations(max_iter)
     {
     }
+
+    // Derived bounds for square viewport (e.g. saved-views display)
+    FloatType half_extent() const { return static_cast<FloatType>(2.0) / zoom; }
+    FloatType x_min() const { return midpoint_x - half_extent(); }
+    FloatType x_max() const { return midpoint_x + half_extent(); }
+    FloatType y_min() const { return midpoint_y - half_extent(); }
+    FloatType y_max() const { return midpoint_y + half_extent(); }
 };
 
 // Get the path to the config file (~/.mandel)

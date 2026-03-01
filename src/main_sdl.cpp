@@ -101,9 +101,11 @@ int main(int /* argc */, char* /* argv */[])
     }
     ThreadPool thread_pool(num_threads);
 
+    int window_w, window_h;
+    SDL_GetWindowSize(window, &window_w, &window_h);
+
     // Create and set up UI (handles overscan, user input, texture management)
-    // Platform-specific texture operations are handled via callbacks
-    mandel::MandelUI ui(update_texture_opengl, delete_texture_opengl, thread_pool);
+    mandel::MandelUI ui(update_texture_opengl, delete_texture_opengl, thread_pool, window_w, window_h);
 
     // Main loop
     bool done = false;

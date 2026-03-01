@@ -1,7 +1,5 @@
 #pragma once
 
-#include "imgui.h"
-
 #include <map>
 #include <string>
 
@@ -22,6 +20,8 @@ public:
     
     // Get current state
     virtual ViewState get_viewport_bounds() const = 0;
+    // Get visible viewport bounds (min/max) accounting for overscan and display_offset
+    virtual void get_visible_viewport_bounds(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const = 0;
     virtual bool is_render_in_progress() const = 0;
     virtual int get_max_iterations() const = 0;
     virtual unsigned int get_render_generation() const = 0;

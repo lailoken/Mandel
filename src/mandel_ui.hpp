@@ -27,11 +27,13 @@ using TextureDeleteFunc = void (*)(ImTextureID texture_id);
 class MandelUI : public MandelUIControlInterface
 {
 public:
-   MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func, ThreadPool& thread_pool);
+   MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func, ThreadPool& thread_pool,
+            int initial_width = 800, int initial_height = 800);
    ~MandelUI();
 
    // MandelUIControlInterface interface
    ViewState get_viewport_bounds() const override;
+   void get_visible_viewport_bounds(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const override;
    bool is_render_in_progress() const override;
    int get_max_iterations() const override;
    unsigned int get_render_generation() const override;
@@ -81,6 +83,12 @@ private:
     void convert_canvas_to_viewport_bounds(FloatType canvas_x_min, FloatType canvas_x_max, FloatType canvas_y_min,
                                            FloatType canvas_y_max, FloatType& viewport_x_min, FloatType& viewport_x_max,
                                            FloatType& viewport_y_min, FloatType& viewport_y_max) const;
+    void convert_canvas_to_viewport_bounds(int canvas_w, int canvas_h, int margin_x, int margin_y,
+                                           FloatType canvas_x_min, FloatType canvas_x_max, FloatType canvas_y_min,
+                                           FloatType canvas_y_max, FloatType& viewport_x_min, FloatType& viewport_x_max,
+                                           FloatType& viewport_y_min, FloatType& viewport_y_max) const;
+    void compute_canvas_bounds(FloatType& canvas_x_min, FloatType& canvas_x_max,
+                               FloatType& canvas_y_min, FloatType& canvas_y_max) const;
     void handle_pan(float display_offset_x, float display_offset_y);
     void handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_screen_y);
     // Convert display_offset from old texture bounds to new (so same complex point stays under mouse)
@@ -102,18 +110,19 @@ private:
     float display_offset_y_;
     bool is_dragging_;
 
-    // State
+    // State - viewport uses midpoint + zoom (1:1 aspect)
     std::atomic<unsigned int> render_generation_;
     unsigned int displayed_generation_; // Generation of the currently displayed texture
-    FloatType canvas_x_min_;
-    FloatType canvas_x_max_;
-    FloatType canvas_y_min_;
-    FloatType canvas_y_max_;
-    // Bounds for currently displayed texture (what front texture was rendered for)
+    FloatType viewport_midpoint_x_;
+    FloatType viewport_midpoint_y_;
+    FloatType zoom_;
+    // Bounds and dimensions for currently displayed texture
     FloatType displayed_texture_canvas_x_min_;
     FloatType displayed_texture_canvas_x_max_;
     FloatType displayed_texture_canvas_y_min_;
     FloatType displayed_texture_canvas_y_max_;
+    int displayed_canvas_width_;
+    int displayed_canvas_height_;
     // Bounds for the texture we just rendered (render_start when we started)
     FloatType render_start_canvas_x_min_;
     FloatType render_start_canvas_x_max_;

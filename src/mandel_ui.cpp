@@ -18,10 +18,11 @@
 namespace mandel
 {
 
-MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func, ThreadPool& thread_pool)
+MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func, ThreadPool& thread_pool,
+                   int initial_width, int initial_height)
     : update_texture_func_(update_func),
       delete_texture_func_(delete_func),
-      overscan_viewport_(800, 800),
+      overscan_viewport_(initial_width, initial_height),
       texture_front_(0),
       texture_back_(0),
       display_offset_x_(0.0f),
@@ -29,18 +30,19 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
       is_dragging_(false),
       render_generation_(0),
       displayed_generation_(0),
-      canvas_x_min_(-2.0L),
-      canvas_x_max_(0.5L),
-      canvas_y_min_(-1.125L),
-      canvas_y_max_(1.125L),
+      viewport_midpoint_x_(-0.75L),
+      viewport_midpoint_y_(0.0L),
+      zoom_(1.6L),
       displayed_texture_canvas_x_min_(-2.0L),
       displayed_texture_canvas_x_max_(0.5L),
-      displayed_texture_canvas_y_min_(-1.125L),
-      displayed_texture_canvas_y_max_(1.125L),
+      displayed_texture_canvas_y_min_(-1.25L),
+      displayed_texture_canvas_y_max_(1.25L),
+      displayed_canvas_width_(0),
+      displayed_canvas_height_(0),
       render_start_canvas_x_min_(-2.0L),
       render_start_canvas_x_max_(0.5L),
-      render_start_canvas_y_min_(-1.125L),
-      render_start_canvas_y_max_(1.125L),
+      render_start_canvas_y_min_(-1.25L),
+      render_start_canvas_y_max_(1.25L),
       pending_pan_pixels_x_(0),
       pending_pan_pixels_y_(0),
       pending_zoom_offset_x_(0.0f),
@@ -59,26 +61,31 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
     LoadedViews loaded = load_views_from_file();
     saved_views_ = loaded.saved_views;
 
-    // Convert viewport bounds to canvas bounds (add overscan margins)
-    convert_viewport_to_canvas_bounds(-2.0L, 0.5L, -1.125L, 1.125L, canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_);
-    displayed_texture_canvas_x_min_ = canvas_x_min_;
-    displayed_texture_canvas_x_max_ = canvas_x_max_;
-    displayed_texture_canvas_y_min_ = canvas_y_min_;
-    displayed_texture_canvas_y_max_ = canvas_y_max_;
-    render_start_canvas_x_min_ = canvas_x_min_;
-    render_start_canvas_x_max_ = canvas_x_max_;
-    render_start_canvas_y_min_ = canvas_y_min_;
-    render_start_canvas_y_max_ = canvas_y_max_;
+    // Use loaded current view if available
+    if (loaded.has_current_view)
+    {
+        viewport_midpoint_x_ = loaded.current_view.midpoint_x;
+        viewport_midpoint_y_ = loaded.current_view.midpoint_y;
+        zoom_ = loaded.current_view.zoom;
+        max_iterations_ = loaded.current_view.max_iterations;
+    }
 
-    // Initial applied settings (viewport bounds + max iter)
-    FloatType vx_min, vx_max, vy_min, vy_max;
-    convert_canvas_to_viewport_bounds(canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, vx_min, vx_max, vy_min, vy_max);
-    applied_settings_ = ViewState(vx_min, vx_max, vy_min, vy_max, max_iterations_);
+    // Compute canvas bounds from midpoint + zoom (same logic as compute_canvas_bounds)
+    FloatType cx_min, cx_max, cy_min, cy_max;
+    compute_canvas_bounds(cx_min, cx_max, cy_min, cy_max);
+    displayed_texture_canvas_x_min_ = render_start_canvas_x_min_ = cx_min;
+    displayed_texture_canvas_x_max_ = render_start_canvas_x_max_ = cx_max;
+    displayed_texture_canvas_y_min_ = render_start_canvas_y_min_ = cy_min;
+    displayed_texture_canvas_y_max_ = render_start_canvas_y_max_ = cy_max;
+    displayed_canvas_width_ = overscan_viewport_.canvas_width();
+    displayed_canvas_height_ = overscan_viewport_.canvas_height();
+
+    applied_settings_ = ViewState(viewport_midpoint_x_, viewport_midpoint_y_, zoom_, max_iterations_);
 
     // Create MandelWorker for real Mandelbrot rendering
     worker_ = std::make_unique<MandelWorker>(
         overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(), render_generation_,
-        canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, thread_pool_);
+        cx_min, cx_max, cy_min, cy_max, thread_pool_);
     worker_->set_max_iterations(max_iterations_);
 
     // Start initial render
@@ -87,6 +94,9 @@ MandelUI::MandelUI(TextureUpdateFunc update_func, TextureDeleteFunc delete_func,
 
 MandelUI::~MandelUI()
 {
+    ViewState current = get_viewport_bounds();
+    save_views_to_file(saved_views_, &current);
+
     if (delete_texture_func_)
     {
         if (texture_front_ != 0)
@@ -104,6 +114,7 @@ void MandelUI::convert_viewport_to_canvas_bounds(FloatType viewport_x_min, Float
                                                   FloatType viewport_y_max, FloatType& canvas_x_min, FloatType& canvas_x_max,
                                                   FloatType& canvas_y_min, FloatType& canvas_y_max) const
 {
+    // 1:1 coord aspect: square viewport region mapped to full window (may be non-square in pixels)
     FloatType viewport_x_range = viewport_x_max - viewport_x_min;
     FloatType viewport_y_range = viewport_y_max - viewport_y_min;
     FloatType pixel_to_x = viewport_x_range / static_cast<FloatType>(overscan_viewport_.viewport_width());
@@ -118,47 +129,65 @@ void MandelUI::convert_viewport_to_canvas_bounds(FloatType viewport_x_min, Float
 void MandelUI::convert_canvas_to_viewport_bounds(FloatType canvas_x_min, FloatType canvas_x_max, FloatType canvas_y_min, FloatType canvas_y_max, FloatType& viewport_x_min,
                                                  FloatType& viewport_x_max, FloatType& viewport_y_min, FloatType& viewport_y_max) const
 {
-    FloatType canvas_x_range = canvas_x_max - canvas_x_min;
-    FloatType canvas_y_range = canvas_y_max - canvas_y_min;
-    FloatType pixel_to_x = canvas_x_range / static_cast<FloatType>(overscan_viewport_.canvas_width());
-    FloatType pixel_to_y = canvas_y_range / static_cast<FloatType>(overscan_viewport_.canvas_height());
-
-    viewport_x_min = canvas_x_min + pixel_to_x * static_cast<FloatType>(overscan_viewport_.margin_x());
-    viewport_x_max = canvas_x_max - pixel_to_x * static_cast<FloatType>(overscan_viewport_.margin_x());
-    viewport_y_min = canvas_y_min + pixel_to_y * static_cast<FloatType>(overscan_viewport_.margin_y());
-    viewport_y_max = canvas_y_max - pixel_to_y * static_cast<FloatType>(overscan_viewport_.margin_y());
+    convert_canvas_to_viewport_bounds(overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(),
+                                       overscan_viewport_.margin_x(), overscan_viewport_.margin_y(),
+                                       canvas_x_min, canvas_x_max, canvas_y_min, canvas_y_max,
+                                       viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max);
 }
 
-void MandelUI::handle_resize(int viewport_width, int viewport_height)
+void MandelUI::convert_canvas_to_viewport_bounds(int canvas_w, int canvas_h, int margin_x, int margin_y,
+                                                 FloatType canvas_x_min, FloatType canvas_x_max, FloatType canvas_y_min,
+                                                 FloatType canvas_y_max, FloatType& viewport_x_min,
+                                                 FloatType& viewport_x_max, FloatType& viewport_y_min,
+                                                 FloatType& viewport_y_max) const
 {
-    if (viewport_width == overscan_viewport_.viewport_width() && viewport_height == overscan_viewport_.viewport_height())
+    FloatType canvas_x_range = canvas_x_max - canvas_x_min;
+    FloatType canvas_y_range = canvas_y_max - canvas_y_min;
+    FloatType pixel_to_x = canvas_x_range / static_cast<FloatType>(canvas_w);
+    FloatType pixel_to_y = canvas_y_range / static_cast<FloatType>(canvas_h);
+
+    viewport_x_min = canvas_x_min + pixel_to_x * static_cast<FloatType>(margin_x);
+    viewport_x_max = canvas_x_max - pixel_to_x * static_cast<FloatType>(margin_x);
+    viewport_y_min = canvas_y_min + pixel_to_y * static_cast<FloatType>(margin_y);
+    viewport_y_max = canvas_y_max - pixel_to_y * static_cast<FloatType>(margin_y);
+}
+
+void MandelUI::compute_canvas_bounds(FloatType& canvas_x_min, FloatType& canvas_x_max,
+                                       FloatType& canvas_y_min, FloatType& canvas_y_max) const
+{
+    // 1:1 scale (no stretch), zoom and midpoint invariant on resize: scale uses fixed reference.
+    // Shrinking window crops (shows less); enlarging shows more. Center and zoom stay fixed.
+    constexpr int scale_reference = 800;  // Pixels: matches legacy 800x800 square behavior
+    FloatType scale = static_cast<FloatType>(4.0) / (zoom_ * static_cast<FloatType>(scale_reference));
+    int vw = overscan_viewport_.viewport_width();
+    int vh = overscan_viewport_.viewport_height();
+    FloatType half_x = static_cast<FloatType>(vw) * scale / static_cast<FloatType>(2);
+    FloatType half_y = static_cast<FloatType>(vh) * scale / static_cast<FloatType>(2);
+
+    FloatType vx_min = viewport_midpoint_x_ - half_x;
+    FloatType vx_max = viewport_midpoint_x_ + half_x;
+    FloatType vy_min = viewport_midpoint_y_ - half_y;
+    FloatType vy_max = viewport_midpoint_y_ + half_y;
+    convert_viewport_to_canvas_bounds(vx_min, vx_max, vy_min, vy_max, canvas_x_min, canvas_x_max, canvas_y_min, canvas_y_max);
+}
+
+void MandelUI::handle_resize(int window_width, int window_height)
+{
+    if (window_width == overscan_viewport_.viewport_width() && window_height == overscan_viewport_.viewport_height())
     {
         return;
     }
 
-    overscan_viewport_.set_viewport_size(viewport_width, viewport_height);
+    overscan_viewport_.set_viewport_size(window_width, window_height);
 
-    // Get current viewport bounds
-    FloatType viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max;
-    convert_canvas_to_viewport_bounds(canvas_x_min_, canvas_x_max_,
-                                       canvas_y_min_, canvas_y_max_,
-                                       viewport_x_min, viewport_x_max,
-                                       viewport_y_min, viewport_y_max);
-
-    // Convert back to canvas bounds with new margins
-    FloatType new_canvas_x_min, new_canvas_x_max, new_canvas_y_min, new_canvas_y_max;
-    convert_viewport_to_canvas_bounds(viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max,
-                                       new_canvas_x_min, new_canvas_x_max, new_canvas_y_min, new_canvas_y_max);
-
-    canvas_x_min_ = new_canvas_x_min;
-    canvas_x_max_ = new_canvas_x_max;
-    canvas_y_min_ = new_canvas_y_min;
-    canvas_y_max_ = new_canvas_y_max;
+    // Recompute canvas bounds from viewport midpoint + zoom (margins changed)
+    FloatType cx_min, cx_max, cy_min, cy_max;
+    compute_canvas_bounds(cx_min, cx_max, cy_min, cy_max);
 
     // Recreate worker with new dimensions
     worker_ = std::make_unique<MandelWorker>(
         overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(), render_generation_,
-        canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, thread_pool_);
+        cx_min, cx_max, cy_min, cy_max, thread_pool_);
     worker_->set_max_iterations(max_iterations_);
     render_source_ = RenderSource::OTHER;
     start_render();
@@ -167,17 +196,19 @@ void MandelUI::handle_resize(int viewport_width, int viewport_height)
 void MandelUI::start_render()
 {
     render_generation_.fetch_add(1);
-    // Record bounds this render is for (so swap conversion uses correct render_start)
-    render_start_canvas_x_min_ = canvas_x_min_;
-    render_start_canvas_x_max_ = canvas_x_max_;
-    render_start_canvas_y_min_ = canvas_y_min_;
-    render_start_canvas_y_max_ = canvas_y_max_;
-    
+    // Compute canvas bounds from viewport midpoint + zoom
+    FloatType cx_min, cx_max, cy_min, cy_max;
+    compute_canvas_bounds(cx_min, cx_max, cy_min, cy_max);
+    render_start_canvas_x_min_ = cx_min;
+    render_start_canvas_x_max_ = cx_max;
+    render_start_canvas_y_min_ = cy_min;
+    render_start_canvas_y_max_ = cy_max;
+
     // Update worker bounds so it renders the correct region
-    worker_->canvas_x_min_ = canvas_x_min_;
-    worker_->canvas_x_max_ = canvas_x_max_;
-    worker_->canvas_y_min_ = canvas_y_min_;
-    worker_->canvas_y_max_ = canvas_y_max_;
+    worker_->canvas_x_min_ = cx_min;
+    worker_->canvas_x_max_ = cx_max;
+    worker_->canvas_y_min_ = cy_min;
+    worker_->canvas_y_max_ = cy_max;
     
     worker_->set_max_iterations(max_iterations_);
     worker_->start_render();
@@ -195,7 +226,8 @@ void MandelUI::handle_input()
     ImVec2 viewport_size = viewport->Size;
     ImVec2 mouse_pos = io.MousePos;
     bool mouse_over_viewport =
-        (mouse_pos.x >= viewport_pos.x && mouse_pos.x < viewport_pos.x + viewport_size.x && mouse_pos.y >= viewport_pos.y && mouse_pos.y < viewport_pos.y + viewport_size.y);
+        (mouse_pos.x >= viewport_pos.x && mouse_pos.x < viewport_pos.x + viewport_size.x &&
+         mouse_pos.y >= viewport_pos.y && mouse_pos.y < viewport_pos.y + viewport_size.y);
     bool control_window_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow);
     // Don't pan when ImGui is using the mouse (e.g. slider drag, combo box)
     bool imgui_wants_mouse = io.WantCaptureMouse;
@@ -252,125 +284,101 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
     DEBUG_PRINTF("handle_pan: offset=(%.2f, %.2f) render_pending=%d\n", display_offset_x, display_offset_y, render_pending_);
 
     // 1. Save bounds of texture currently on screen (for swap conversion later).
-    //    Only when no async render is pending does canvas_ match the front texture;
-    //    when render_pending_, the front texture is still the old one so keep displayed_texture_*.
+    //    Only when no async render is pending do we update displayed_texture from current state.
     if (!render_pending_)
     {
-        displayed_texture_canvas_x_min_ = canvas_x_min_;
-        displayed_texture_canvas_x_max_ = canvas_x_max_;
-        displayed_texture_canvas_y_min_ = canvas_y_min_;
-        displayed_texture_canvas_y_max_ = canvas_y_max_;
+        FloatType cx_min, cx_max, cy_min, cy_max;
+        compute_canvas_bounds(cx_min, cx_max, cy_min, cy_max);
+        displayed_texture_canvas_x_min_ = cx_min;
+        displayed_texture_canvas_x_max_ = cx_max;
+        displayed_texture_canvas_y_min_ = cy_min;
+        displayed_texture_canvas_y_max_ = cy_max;
     }
 
-    // 2. Get viewport bounds for what's actually on screen (use displayed when render pending)
+    // 2. Get viewport bounds for what's on screen - use displayed texture's overscan dimensions
+    int disp_w = (displayed_canvas_width_ > 0) ? displayed_canvas_width_ : overscan_viewport_.canvas_width();
+    int disp_h = (displayed_canvas_height_ > 0) ? displayed_canvas_height_ : overscan_viewport_.canvas_height();
+    int disp_mx = (disp_w + 5) / 8;
+    int disp_my = (disp_h + 5) / 8;
+
     FloatType viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max;
-    if (render_pending_)
-        convert_canvas_to_viewport_bounds(displayed_texture_canvas_x_min_, displayed_texture_canvas_x_max_,
-                                           displayed_texture_canvas_y_min_, displayed_texture_canvas_y_max_,
-                                           viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max);
-    else
-        convert_canvas_to_viewport_bounds(canvas_x_min_, canvas_x_max_,
-                                           canvas_y_min_, canvas_y_max_,
-                                           viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max);
+    convert_canvas_to_viewport_bounds(disp_w, disp_h, disp_mx, disp_my,
+                                       displayed_texture_canvas_x_min_, displayed_texture_canvas_x_max_,
+                                       displayed_texture_canvas_y_min_, displayed_texture_canvas_y_max_,
+                                       viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max);
 
-    // Calculate pixel size in complex units
-    FloatType canvas_width_f = static_cast<FloatType>(overscan_viewport_.canvas_width());
-    FloatType canvas_height_f = static_cast<FloatType>(overscan_viewport_.canvas_height());
-    FloatType pixel_size_x = (canvas_x_max_ - canvas_x_min_) / canvas_width_f;
-    FloatType pixel_size_y = (canvas_y_max_ - canvas_y_min_) / canvas_height_f; // Magnitude depends on min/max order
+    // Pixel size from displayed texture (uses its canvas dimensions)
+    FloatType canvas_w_f = static_cast<FloatType>(disp_w);
+    FloatType canvas_h_f = static_cast<FloatType>(disp_h);
+    FloatType pixel_size_x = (displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_) / canvas_w_f;
+    FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / canvas_h_f;
 
-    // Use pixel_size directly for pan calculation to ensure 1:1 mapping between screen pixels and complex shift
     FloatType pan_x = -display_offset_x * pixel_size_x;
     FloatType pan_y = display_offset_y * pixel_size_y;
-    
-    // Snap pan to nearest integer pixel size to avoid sub-pixel shimmer during continuous panning
-    
-    // Snap to nearest multiple of pixel size
-    // Calculate exact integer pixels to avoid float round-trip errors
+
+    // Snap to nearest integer pixel to avoid sub-pixel shimmer
     FloatType raw_pixels_x = pan_x / pixel_size_x;
     FloatType raw_pixels_y = pan_y / pixel_size_y;
     long pan_pixels_x = std::lround(raw_pixels_x);
     long pan_pixels_y = std::lround(raw_pixels_y);
-    
-    // Store exact integer shift for update_textures (prevents drift/jump)
+
     pending_pan_pixels_x_ = pan_pixels_x;
     pending_pan_pixels_y_ = pan_pixels_y;
     render_source_ = RenderSource::PAN;
-    
-    // Use exact integer pixels for pan
+
     pan_x = static_cast<FloatType>(pan_pixels_x) * pixel_size_x;
     pan_y = static_cast<FloatType>(pan_pixels_y) * pixel_size_y;
 
     DEBUG_PRINTF("  Pan snapped: (%.6Lf, %.6Lf) Pixels: (%ld, %ld)\n", pan_x, pan_y, pan_pixels_x, pan_pixels_y);
 
-    // Calculate new viewport bounds
-    viewport_x_min += pan_x;
-    viewport_x_max += pan_x;
-    viewport_y_min += pan_y;
-    viewport_y_max += pan_y;
+    // Update viewport midpoint (center of visible view)
+    FloatType old_center_x = (viewport_x_min + viewport_x_max) / static_cast<FloatType>(2);
+    FloatType old_center_y = (viewport_y_min + viewport_y_max) / static_cast<FloatType>(2);
+    viewport_midpoint_x_ = old_center_x + pan_x;
+    viewport_midpoint_y_ = old_center_y + pan_y;
 
-    // 3–4. Convert to canvas bounds and save as render_start_bounds (what new texture will be for)
-    FloatType new_canvas_x_min, new_canvas_x_max, new_canvas_y_min, new_canvas_y_max;
-    convert_viewport_to_canvas_bounds(viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max,
-                                       new_canvas_x_min, new_canvas_x_max, new_canvas_y_min, new_canvas_y_max);
+    // Store render_start for swap conversion (computed in start_render)
+    FloatType new_vx_min = viewport_x_min + pan_x;
+    FloatType new_vx_max = viewport_x_max + pan_x;
+    FloatType new_vy_min = viewport_y_min + pan_y;
+    FloatType new_vy_max = viewport_y_max + pan_y;
+    convert_viewport_to_canvas_bounds(new_vx_min, new_vx_max, new_vy_min, new_vy_max,
+                                       render_start_canvas_x_min_, render_start_canvas_x_max_,
+                                       render_start_canvas_y_min_, render_start_canvas_y_max_);
 
-    canvas_x_min_ = new_canvas_x_min;
-    canvas_x_max_ = new_canvas_x_max;
-    canvas_y_min_ = new_canvas_y_min;
-    canvas_y_max_ = new_canvas_y_max;
-    render_start_canvas_x_min_ = new_canvas_x_min;
-    render_start_canvas_x_max_ = new_canvas_x_max;
-    render_start_canvas_y_min_ = new_canvas_y_min;
-    render_start_canvas_y_max_ = new_canvas_y_max;
+    applied_settings_ = ViewState(viewport_midpoint_x_, viewport_midpoint_y_, zoom_, max_iterations_);
+    has_pending_settings_ = false;
 
-    // 5. Do NOT reset display_offset here: we keep drawing the old texture with the current
-    //    offset until the new texture is ready, then convert_display_offset_on_swap() sets
-    //    the correct offset for the new texture. Resetting to 0 would make the image jump.
-
-    // Keep applied_settings_ in sync with the new panned bounds.
-    // Without this, control_.draw() sees a mismatch after every PAN render and immediately calls
-    // apply_pending_settings_if_ready, which starts a spurious ZOOM re-render that blocks panning.
-    {
-        FloatType vp_x_min, vp_x_max, vp_y_min, vp_y_max;
-        convert_canvas_to_viewport_bounds(canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_,
-                                           vp_x_min, vp_x_max, vp_y_min, vp_y_max);
-        applied_settings_ = ViewState(vp_x_min, vp_x_max, vp_y_min, vp_y_max, max_iterations_);
-        has_pending_settings_ = false;
-    }
-
-    // 6. Start render
     start_render();
 }
 
 void MandelUI::handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_screen_y)
 {
-    // Accumulate the zoom factor relative to the DISPLAYED texture.
-    // Reset at the start of a new zoom sequence:
-    //   - no render pending (previous render just finished), OR
-    //   - a non-ZOOM render is pending (e.g. PAN). In that case the old accumulator is from a
-    //     previous, unrelated zoom sequence; reusing it inverts the scroll direction when the
-    //     user zooms out after a large zoom-in that was interrupted by a pan.
     if (!render_pending_ || render_source_ != RenderSource::ZOOM)
         accumulated_zoom_factor_ = 1.0f;
     accumulated_zoom_factor_ *= std::pow(1.2f, wheel_delta);
 
-    int cw = overscan_viewport_.canvas_width();
-    int ch = overscan_viewport_.canvas_height();
-    int mx = overscan_viewport_.margin_x();
-    int my = overscan_viewport_.margin_y();
+    // Use displayed texture's overscan dimensions for mouse-to-complex conversion
+    int disp_w = (displayed_canvas_width_ > 0) ? displayed_canvas_width_ : overscan_viewport_.canvas_width();
+    int disp_h = (displayed_canvas_height_ > 0) ? displayed_canvas_height_ : overscan_viewport_.canvas_height();
+    int disp_mx = (disp_w + 5) / 8;
+    int disp_my = (disp_h + 5) / 8;
+    float margin_x_f = static_cast<float>(disp_mx);
+    float margin_y_f = static_cast<float>(disp_my);
+    float canvas_w_f = static_cast<float>(disp_w);
+    float canvas_h_f = static_cast<float>(disp_h);
 
-    // Complex point under mouse in the DISPLAYED texture + current display_offset
-    float canvas_px = static_cast<float>(mx) + mouse_screen_x - display_offset_x_;
-    float canvas_py = static_cast<float>(my) + mouse_screen_y - display_offset_y_;
+    float canvas_px = margin_x_f + mouse_screen_x - display_offset_x_;
+    float canvas_py = margin_y_f + mouse_screen_y - display_offset_y_;
 
     FloatType disp_x_range = displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_;
     FloatType disp_y_range = displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_;
-    FloatType complex_x = displayed_texture_canvas_x_min_ + static_cast<FloatType>(canvas_px) / static_cast<FloatType>(cw) * disp_x_range;
-    FloatType complex_y = displayed_texture_canvas_y_max_ - static_cast<FloatType>(canvas_py) / static_cast<FloatType>(ch) * disp_y_range;
+    FloatType complex_x = displayed_texture_canvas_x_min_ + static_cast<FloatType>(canvas_px) / canvas_w_f * disp_x_range;
+    FloatType complex_y = displayed_texture_canvas_y_max_ - static_cast<FloatType>(canvas_py) / canvas_h_f * disp_y_range;
 
-    // Zoom from the DISPLAYED bounds by the full accumulated factor.
     FloatType vx_min, vx_max, vy_min, vy_max;
-    convert_canvas_to_viewport_bounds(displayed_texture_canvas_x_min_, displayed_texture_canvas_x_max_,
+    convert_canvas_to_viewport_bounds(disp_w, disp_h, disp_mx, disp_my,
+                                       displayed_texture_canvas_x_min_, displayed_texture_canvas_x_max_,
                                        displayed_texture_canvas_y_min_, displayed_texture_canvas_y_max_,
                                        vx_min, vx_max, vy_min, vy_max);
 
@@ -380,31 +388,24 @@ void MandelUI::handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_
     FloatType new_vy_min = complex_y + (vy_min - complex_y) / zoom_f;
     FloatType new_vy_max = complex_y + (vy_max - complex_y) / zoom_f;
 
-    FloatType new_cx_min, new_cx_max, new_cy_min, new_cy_max;
-    convert_viewport_to_canvas_bounds(new_vx_min, new_vx_max, new_vy_min, new_vy_max,
-                                       new_cx_min, new_cx_max, new_cy_min, new_cy_max);
+    // Update viewport midpoint + zoom (1:1 scale)
+    FloatType new_mid_x = (new_vx_min + new_vx_max) / static_cast<FloatType>(2);
+    FloatType new_mid_y = (new_vy_min + new_vy_max) / static_cast<FloatType>(2);
+    FloatType new_extent_x = new_vx_max - new_vx_min;
+    int vw = overscan_viewport_.viewport_width();
+    constexpr int scale_reference = 800;
+    FloatType new_scale = (new_extent_x > 0 && vw > 0) ? new_extent_x / static_cast<FloatType>(vw) : static_cast<FloatType>(4) / (zoom_ * static_cast<FloatType>(scale_reference));
+    FloatType new_zoom = (new_scale > 0) ? static_cast<FloatType>(4) / (new_scale * static_cast<FloatType>(scale_reference)) : zoom_;
 
-    // Proof that target_offset == display_offset_*:
-    //   new_canvas_px = (complex_x - new_cx_min) / new_cx_range * cw
-    //   complex_x is at canvas_px in displayed bounds → it maps to canvas_px in new bounds too
-    //   (zoom is centred on complex_x, so its canvas position is invariant)
-    //   ∴ target_offset = mx + mouse_screen_x - canvas_px = display_offset_*  ✓
-    float target_offset_x = display_offset_x_;
-    float target_offset_y = display_offset_y_;
+    viewport_midpoint_x_ = new_mid_x;
+    viewport_midpoint_y_ = new_mid_y;
+    zoom_ = new_zoom;
 
-    DEBUG_PRINTF("handle_zoom: wheel=%.2f acc=%.4f complex=(%.6Lf, %.6Lf) offset=(%.2f, %.2f)\n",
-                 wheel_delta, accumulated_zoom_factor_, complex_x, complex_y, target_offset_x, target_offset_y);
-
-    canvas_x_min_ = new_cx_min;
-    canvas_x_max_ = new_cx_max;
-    canvas_y_min_ = new_cy_min;
-    canvas_y_max_ = new_cy_max;
-
-    applied_settings_ = ViewState(new_vx_min, new_vx_max, new_vy_min, new_vy_max, max_iterations_);
+    applied_settings_ = ViewState(viewport_midpoint_x_, viewport_midpoint_y_, zoom_, max_iterations_);
     has_pending_settings_ = false;
 
-    pending_zoom_offset_x_ = target_offset_x;
-    pending_zoom_offset_y_ = target_offset_y;
+    pending_zoom_offset_x_ = display_offset_x_;
+    pending_zoom_offset_y_ = display_offset_y_;
     render_source_ = RenderSource::ZOOM;
 
     start_render();
@@ -466,16 +467,17 @@ void MandelUI::convert_display_offset_on_swap()
 {
     DEBUG_PRINTF("convert_display_offset_on_swap: OLD offset=(%.2f, %.2f)\n", display_offset_x_, display_offset_y_);
 
-    int cw = overscan_viewport_.canvas_width();
-    int ch = overscan_viewport_.canvas_height();
+    // Use displayed texture's dimensions (overscan) - not current viewport - for center/pixel calculations.
+    // After resize, displayed texture may have different canvas size than current overscan_viewport_.
+    int disp_w = (displayed_canvas_width_ > 0) ? displayed_canvas_width_ : overscan_viewport_.canvas_width();
+    int disp_h = (displayed_canvas_height_ > 0) ? displayed_canvas_height_ : overscan_viewport_.canvas_height();
+    FloatType canvas_w_f = static_cast<FloatType>(disp_w);
+    FloatType canvas_h_f = static_cast<FloatType>(disp_h);
+    FloatType pixel_size_x = (displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_) / canvas_w_f;
+    FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / canvas_h_f;
 
-    // Direct shift logic based on bound changes
     float px_shift_x = 0.0f;
     float px_shift_y = 0.0f;
-
-    FloatType pixel_size_x = (displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_) / static_cast<FloatType>(cw);
-    // pixel_size_y is magnitude (max-min)/height
-    FloatType pixel_size_y = (displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_) / static_cast<FloatType>(ch);
     
     // The new texture is shifted relative to old texture by (new_min - old_min)
     FloatType shift_x = render_start_canvas_x_min_ - displayed_texture_canvas_x_min_;
@@ -584,6 +586,8 @@ void MandelUI::update_textures()
     displayed_texture_canvas_x_max_ = render_start_canvas_x_max_;
     displayed_texture_canvas_y_min_ = render_start_canvas_y_min_;
     displayed_texture_canvas_y_max_ = render_start_canvas_y_max_;
+    displayed_canvas_width_ = overscan_viewport_.canvas_width();
+    displayed_canvas_height_ = overscan_viewport_.canvas_height();
 }
 
 void MandelUI::draw()
@@ -597,34 +601,38 @@ void MandelUI::draw()
     }
 
     ImGuiIO& io = ImGui::GetIO();
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
 
-    // Handle resize
-    if (io.DisplaySize.x != static_cast<float>(overscan_viewport_.viewport_width()) ||
-        io.DisplaySize.y != static_cast<float>(overscan_viewport_.viewport_height()))
+    // Handle resize - use viewport size (where we draw), fallback to DisplaySize
+    float vp_w = (viewport->Size.x > 0) ? viewport->Size.x : io.DisplaySize.x;
+    float vp_h = (viewport->Size.y > 0) ? viewport->Size.y : io.DisplaySize.y;
+    if (vp_w != static_cast<float>(overscan_viewport_.viewport_width()) ||
+        vp_h != static_cast<float>(overscan_viewport_.viewport_height()))
     {
-        handle_resize(static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y));
+        handle_resize(static_cast<int>(vp_w), static_cast<int>(vp_h));
     }
 
     // Draw the texture first (background)
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
 
     if (texture_front_ != 0)
     {
-        // Snap display offset to integer pixels for drawing to avoid sub-pixel shimmer/blur
-        // usage of floor/ceil/round doesn't matter as long as it's consistent
-        // we use floor to be safe
         float draw_offset_x = std::floor(display_offset_x_);
         float draw_offset_y = std::floor(display_offset_y_);
-        
+
+        // Use displayed texture dimensions for correct center/UV mapping (accounts for overscan)
+        int disp_w = (displayed_canvas_width_ > 0) ? displayed_canvas_width_ : overscan_viewport_.canvas_width();
+        int disp_h = (displayed_canvas_height_ > 0) ? displayed_canvas_height_ : overscan_viewport_.canvas_height();
+
         OverscanViewport::DrawInfo draw_info = overscan_viewport_.calculate_draw_info(
-            viewport->Pos.x, viewport->Pos.y, 
-            draw_offset_x, draw_offset_y, 
-            1.0f, 0.0f, 0.0f);
+            viewport->Pos.x, viewport->Pos.y,
+            draw_offset_x, draw_offset_y,
+            1.0f, 0.0f, 0.0f,
+            disp_w, disp_h);
 
         // Draw grey background
         ImVec2 viewport_min(viewport->Pos.x, viewport->Pos.y);
-        ImVec2 viewport_max(viewport->Pos.x + static_cast<float>(overscan_viewport_.viewport_width()), 
+        ImVec2 viewport_max(viewport->Pos.x + static_cast<float>(overscan_viewport_.viewport_width()),
                            viewport->Pos.y + static_cast<float>(overscan_viewport_.viewport_height()));
         draw_list->AddRectFilled(viewport_min, viewport_max, IM_COL32(64, 64, 64, 255));
 
@@ -666,12 +674,42 @@ void MandelUI::draw()
 
 ViewState MandelUI::get_viewport_bounds() const
 {
-    FloatType viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max;
-    convert_canvas_to_viewport_bounds(canvas_x_min_, canvas_x_max_,
-                                       canvas_y_min_, canvas_y_max_,
-                                       viewport_x_min, viewport_x_max,
-                                       viewport_y_min, viewport_y_max);
-    return ViewState(viewport_x_min, viewport_x_max, viewport_y_min, viewport_y_max, max_iterations_);
+    return ViewState(viewport_midpoint_x_, viewport_midpoint_y_, zoom_, max_iterations_);
+}
+
+void MandelUI::get_visible_viewport_bounds(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const
+{
+    int disp_w = (displayed_canvas_width_ > 0) ? displayed_canvas_width_ : overscan_viewport_.canvas_width();
+    int disp_h = (displayed_canvas_height_ > 0) ? displayed_canvas_height_ : overscan_viewport_.canvas_height();
+    int disp_mx = (disp_w + 5) / 8;
+    int disp_my = (disp_h + 5) / 8;
+    int disp_vw = disp_w - 2 * disp_mx;
+    int disp_vh = disp_h - 2 * disp_my;
+
+    if (disp_vw <= 0 || disp_vh <= 0)
+    {
+        FloatType cx_min, cx_max, cy_min, cy_max;
+        compute_canvas_bounds(cx_min, cx_max, cy_min, cy_max);
+        convert_canvas_to_viewport_bounds(overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(),
+                                          overscan_viewport_.margin_x(), overscan_viewport_.margin_y(),
+                                          cx_min, cx_max, cy_min, cy_max, x_min, x_max, y_min, y_max);
+        return;
+    }
+
+    FloatType cx_range = displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_;
+    FloatType cy_range = displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_;
+    FloatType disp_w_f = static_cast<FloatType>(disp_w);
+    FloatType disp_h_f = static_cast<FloatType>(disp_h);
+
+    float px_left = static_cast<float>(disp_mx) - display_offset_x_;
+    float px_right = static_cast<float>(disp_mx + disp_vw) - display_offset_x_;
+    float py_top = static_cast<float>(disp_my) - display_offset_y_;
+    float py_bottom = static_cast<float>(disp_my + disp_vh) - display_offset_y_;
+
+    x_min = displayed_texture_canvas_x_min_ + static_cast<FloatType>(px_left) / disp_w_f * cx_range;
+    x_max = displayed_texture_canvas_x_min_ + static_cast<FloatType>(px_right) / disp_w_f * cx_range;
+    y_max = displayed_texture_canvas_y_max_ - static_cast<FloatType>(py_top) / disp_h_f * cy_range;
+    y_min = displayed_texture_canvas_y_max_ - static_cast<FloatType>(py_bottom) / disp_h_f * cy_range;
 }
 
 bool MandelUI::is_render_in_progress() const { return render_pending_; }
@@ -702,7 +740,11 @@ ViewState MandelUI::get_pending_settings() const { return pending_settings_; }
 
 bool MandelUI::has_pending_settings() const { return has_pending_settings_; }
 
-ViewState MandelUI::get_initial_bounds() const { return ViewState(-2.0L, 0.5L, -1.125L, 1.125L, 512); }
+ViewState MandelUI::get_initial_bounds() const
+{
+    // Classic view: midpoint (-0.75, 0), zoom 1.6 gives [-2, 0.5] x [-1.25, 1.25]
+    return ViewState(-0.75L, 0.0L, 1.6L, 512);
+}
 
 uint64_t MandelUI::get_initial_zoom() const { return 1; }
 
@@ -714,36 +756,22 @@ void MandelUI::set_pending_settings(const ViewState& settings)
 
 void MandelUI::apply_view_state(const ViewState& state)
 {
-    FloatType new_cx_min, new_cx_max, new_cy_min, new_cy_max;
-    convert_viewport_to_canvas_bounds(state.x_min, state.x_max, state.y_min, state.y_max,
-                                       new_cx_min, new_cx_max, new_cy_min, new_cy_max);
+    bool bounds_changed = (state.midpoint_x != applied_settings_.midpoint_x) ||
+                          (state.midpoint_y != applied_settings_.midpoint_y) ||
+                          (state.zoom != applied_settings_.zoom);
 
-    // Detect iteration-only changes (bounds unchanged). Preserve display_offset so the view
-    // doesn't snap to center when the user just changes max iterations.
-    // Use a half-pixel tolerance that scales with zoom so it stays valid at any depth.
-    // 1e-9 absolute was wrong at deep zoom: at zoom 1e9, pixel_size ≈ 3e-12, so 1e-9 ≈ 333 px
-    // and even a one-notch zoom-slider move (≈1e-10 change) was invisible to this check.
-    FloatType pixel_size_x = (canvas_x_max_ - canvas_x_min_) /
-                              static_cast<FloatType>(overscan_viewport_.canvas_width());
-    FloatType pixel_size_y = (canvas_y_max_ - canvas_y_min_) /
-                              static_cast<FloatType>(overscan_viewport_.canvas_height());
-    FloatType tol_x = pixel_size_x * static_cast<FloatType>(0.5);
-    FloatType tol_y = pixel_size_y * static_cast<FloatType>(0.5);
-    bool bounds_changed = std::abs(new_cx_min - canvas_x_min_) > tol_x ||
-                          std::abs(new_cx_max - canvas_x_max_) > tol_x ||
-                          std::abs(new_cy_min - canvas_y_min_) > tol_y ||
-                          std::abs(new_cy_max - canvas_y_max_) > tol_y;
-
-    canvas_x_min_ = new_cx_min;
-    canvas_x_max_ = new_cx_max;
-    canvas_y_min_ = new_cy_min;
-    canvas_y_max_ = new_cy_max;
+    viewport_midpoint_x_ = state.midpoint_x;
+    viewport_midpoint_y_ = state.midpoint_y;
+    zoom_ = state.zoom;
     max_iterations_ = state.max_iterations;
+
+    FloatType new_cx_min, new_cx_max, new_cy_min, new_cy_max;
+    compute_canvas_bounds(new_cx_min, new_cx_max, new_cy_min, new_cy_max);
     applied_settings_ = state;
     has_pending_settings_ = false;
     worker_ = std::make_unique<MandelWorker>(
         overscan_viewport_.canvas_width(), overscan_viewport_.canvas_height(), render_generation_,
-        canvas_x_min_, canvas_x_max_, canvas_y_min_, canvas_y_max_, thread_pool_);
+        new_cx_min, new_cx_max, new_cy_min, new_cy_max, thread_pool_);
     worker_->set_max_iterations(max_iterations_);
     pending_zoom_offset_x_ = bounds_changed ? 0.0f : display_offset_x_;
     pending_zoom_offset_y_ = bounds_changed ? 0.0f : display_offset_y_;
@@ -753,17 +781,19 @@ void MandelUI::apply_view_state(const ViewState& state)
 
 void MandelUI::save_view_state(const std::string& name)
 {
-    // Update the specific view with current viewport settings
     ViewState viewport = get_viewport_bounds();
     saved_views_[name] = viewport;
-    
-    // Save all views to file
-    save_views_to_file(saved_views_);
+    save_views_to_file(saved_views_, &viewport);
 }
 
 void MandelUI::extend_bounds_for_overscan(FloatType& x_min, FloatType& x_max, FloatType& y_min, FloatType& y_max) const
 {
-    convert_viewport_to_canvas_bounds(x_min, x_max, y_min, y_max, x_min, x_max, y_min, y_max);
+    FloatType cx_min, cx_max, cy_min, cy_max;
+    convert_viewport_to_canvas_bounds(x_min, x_max, y_min, y_max, cx_min, cx_max, cy_min, cy_max);
+    x_min = cx_min;
+    x_max = cx_max;
+    y_min = cy_min;
+    y_max = cy_max;
 }
 
 void MandelUI::apply_pending_settings_if_ready()

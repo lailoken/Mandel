@@ -105,43 +105,29 @@ void MandelControl::draw()
         {
             // Display controls using ImGui widgets
             // Use FloatType directly with appropriate ImGui input functions
-            // Initialize applied_settings_ from worker if not yet initialized (first frame after render completes)
+            // Initialize applied_settings_ from worker if not yet initialized
             ViewState applied_settings = ui_interface_->get_applied_settings();
             if (applied_settings.max_iterations == 0 && !ui_interface_->is_render_in_progress())
             {
-                ViewState viewport = ui_interface_->get_viewport_bounds();
-                applied_settings = ViewState(viewport.x_min, viewport.x_max, viewport.y_min, viewport.y_max, ui_interface_->get_max_iterations());
+                applied_settings = ui_interface_->get_viewport_bounds();
             }
 
-            // Get current settings (from worker if no pending, otherwise from pending)
-            // Use viewport bounds (what user sees), not buffer bounds
+            // Get current settings (midpoint + zoom)
             int max_iter = ui_interface_->has_pending_settings() ? ui_interface_->get_pending_settings().max_iterations : ui_interface_->get_max_iterations();
-            FloatType x_min, x_max, y_min, y_max;
+            FloatType midpoint_x, midpoint_y, zoom;
             if (ui_interface_->has_pending_settings())
             {
                 ViewState pending = ui_interface_->get_pending_settings();
-                x_min = pending.x_min;
-                x_max = pending.x_max;
-                y_min = pending.y_min;
-                y_max = pending.y_max;
+                midpoint_x = pending.midpoint_x;
+                midpoint_y = pending.midpoint_y;
+                zoom = pending.zoom;
             }
             else
             {
                 ViewState viewport = ui_interface_->get_viewport_bounds();
-                x_min = viewport.x_min;
-                x_max = viewport.x_max;
-                y_min = viewport.y_min;
-                y_max = viewport.y_max;
-            }
-
-            // Calculate zoom from bounds (always derive from current bounds, not from worker)
-            FloatType zoom = static_cast<FloatType>(1.0);
-            FloatType x_range = x_max - x_min;
-            FloatType y_range = y_max - y_min;
-            if (x_range > static_cast<FloatType>(0.0) && y_range > static_cast<FloatType>(0.0))
-            {
-                FloatType avg_range = (x_range + y_range) / static_cast<FloatType>(2.0);
-                zoom = static_cast<FloatType>(4.0) / avg_range;
+                midpoint_x = viewport.midpoint_x;
+                midpoint_y = viewport.midpoint_y;
+                zoom = viewport.zoom;
             }
 
             // Get max zoom for clamping
@@ -153,64 +139,66 @@ void MandelControl::draw()
             ImGui::SliderInt("Max Iterations", &max_iter, 2, 4096, "%d", ImGuiSliderFlags_Logarithmic);
 
             ImGui::PushItemWidth(120.f);
-            // Use the larger epsilon between float and FloatType - scaled for practical UI use
-            // Epsilon is of FloatType
             constexpr FloatType eps = std::numeric_limits<FloatType>::epsilon() * static_cast<FloatType>(100.0);
-
-            // Format string for long double precision
             const char* format_str = "%.16Lf";
             FloatType step = static_cast<FloatType>(0.0);
 
-            ImGui::TextUnformatted("Min:");
-            ImGui::SameLine();
-            detail::imgui_input_float(",##min_x", &x_min, step, step, format_str);
-            if (x_min >= x_max)
+            // Visible range (min/max) - accounts for overscan and display_offset
+            FloatType vis_x_min, vis_x_max, vis_y_min, vis_y_max;
+            ui_interface_->get_visible_viewport_bounds(vis_x_min, vis_x_max, vis_y_min, vis_y_max);
+
+            // width of logn double:
+            const float full_float_text_width = ImGui::CalcTextSize("-0.140123839109080101").x;
+            const float label_w = ImGui::CalcTextSize("X Range: ").x;
+            const float spacing_between_floats = 10.f;
+            // needs to fit: 0.1401238391090801
+            const char* range_fmt = "%.17f";
+            const char* range_fmt_to = "%.17f";
+
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.f, 4.f));
+            float start_x = ImGui::GetCursorPosX();
+
+            ImGui::Text("X Range:");
+            ImGui::SameLine(start_x + label_w);
+            ImGui::Text(range_fmt, static_cast<double>(vis_x_min));
+            ImGui::SameLine(start_x + label_w + full_float_text_width + spacing_between_floats);
+            ImGui::Text(range_fmt_to, static_cast<double>(vis_x_max));
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             {
-                x_max = x_min + eps;
+                ImGui::SetTooltip("Visible area in window (accounts for overscan/pan)");
             }
 
-            ImGui::SameLine();
-            detail::imgui_input_float(",##min_y", &y_min, step, step, format_str);
-            if (y_max <= y_min)
-            {
-                y_max = y_min + eps;
-            }
+            ImGui::Text("Y Range:");
+            ImGui::SameLine(start_x + label_w);
+            ImGui::Text(range_fmt, static_cast<double>(vis_y_min));
+            ImGui::SameLine(start_x + label_w + full_float_text_width + spacing_between_floats);
+            ImGui::Text(range_fmt_to, static_cast<double>(vis_y_max));
 
-            ImGui::TextUnformatted("Max:");
+            ImGui::PopStyleVar();
+
+            ImGui::TextUnformatted("Midpoint:");
             ImGui::SameLine();
 
-            detail::imgui_input_float(",##max_x", &x_max, step, step, format_str);
-            if (x_min >= x_max)
-            {
-                x_min = x_max - eps;
-            }
-
+            // Make these wide:
+            auto const& style = ImGui::GetStyle();
+            ImGui::PushItemWidth(full_float_text_width + style.FramePadding.x * 2.f);
+            detail::imgui_input_float(",##mid_x", &midpoint_x, step, step, format_str);
             ImGui::SameLine();
-            detail::imgui_input_float(",##max_y", &y_max, step, step, format_str);
-            if (y_min >= y_max)
+            detail::imgui_input_float(",##mid_y", &midpoint_y, step, step, format_str);
+            ImGui::PopItemWidth();
+
+            if (zoom < eps)
             {
-                y_min = y_max - eps;
+                zoom = eps;
             }
             ImGui::PopItemWidth();
 
-            // Zoom slider - when changed, convert to bounds
-            // Note: We use double for ImGui slider, which may lose precision for long double, but we detect changes directly
+            // Zoom slider - uses log scale for "10^X" display
             double zoom_d = static_cast<double>(zoom);
             double const min_zoom_d = static_cast<double>(min_zoom);
             double const max_zoom_d = static_cast<double>(max_zoom);
 
-            // Convert zoom to log10 for display (power)
-            // If zoom is 1.0 (10^0), display 0.0
-            // If zoom is 10.0 (10^1), display 1.0
-            // If zoom is 1000.0 (10^3), display 3.0
-            // We'll construct a format string like "10^%.2f"
-            double log_zoom = std::log10(std::max(zoom_d, min_zoom_d));
-
-            // Format string: "10^<power>"
-            char zoom_format[32];
-            std::snprintf(zoom_format, sizeof(zoom_format), "10^%%.2f");
-
-            // But wait, ImGui::SliderScalar displays the VALUE, not a derived string from the value unless we change the value type or intercept the display.
+            // Slider controls the exponent (log10(zoom)) for "10^X" display
             // SliderScalar uses the value passed to it. If we want to display the power, we could map the slider to the log scale directly?
             // But the slider is already logarithmic (ImGuiSliderFlags_Logarithmic).
             // Let's keep the slider value as the actual zoom, but provide a custom format string if possible?
@@ -248,40 +236,23 @@ void MandelControl::draw()
 
             if (zoom_edited)
             {
-                // Convert back from log10(zoom) to zoom
-                double new_zoom_d = std::pow(10.0, log_zoom_val);
-
-                FloatType new_zoom = static_cast<FloatType>(new_zoom_d);
-                new_zoom = std::clamp(new_zoom, min_zoom, max_zoom);
-                // Convert zoom change to bounds change
-                FloatType center_x = (x_min + x_max) / static_cast<FloatType>(2.0);
-                FloatType center_y = (y_min + y_max) / static_cast<FloatType>(2.0);
-                FloatType scale = static_cast<FloatType>(4.0) / new_zoom;
-                x_min = center_x - scale / static_cast<FloatType>(2.0);
-                x_max = center_x + scale / static_cast<FloatType>(2.0);
-                y_min = center_y - scale / static_cast<FloatType>(2.0);
-                y_max = center_y + scale / static_cast<FloatType>(2.0);
-                // Force settings changed when zoom is edited (precision loss in double conversion can make bounds comparison fail)
+                zoom = static_cast<FloatType>(std::pow(10.0, log_zoom_val));
+                zoom = std::clamp(zoom, min_zoom, max_zoom);
                 settings_changed = true;
             }
 
-            // Compare current UI values with applied settings to detect changes (only if zoom wasn't just edited)
             if (!zoom_edited)
             {
                 const FloatType comparison_eps =
                     std::max(static_cast<FloatType>(std::numeric_limits<float>::epsilon()), std::numeric_limits<FloatType>::epsilon()) * static_cast<FloatType>(100.0);
-                settings_changed = (max_iter != applied_settings.max_iterations) || (std::abs(x_min - applied_settings.x_min) > comparison_eps) ||
-                                   (std::abs(x_max - applied_settings.x_max) > comparison_eps) || (std::abs(y_min - applied_settings.y_min) > comparison_eps) ||
-                                   (std::abs(y_max - applied_settings.y_max) > comparison_eps);
+                settings_changed = (max_iter != applied_settings.max_iterations) || (std::abs(midpoint_x - applied_settings.midpoint_x) > comparison_eps) ||
+                                   (std::abs(midpoint_y - applied_settings.midpoint_y) > comparison_eps) || (std::abs(zoom - applied_settings.zoom) > comparison_eps);
             }
 
-            // Update pending settings if changed
             if (settings_changed)
             {
-                ui_interface_->set_pending_settings(ViewState(x_min, x_max, y_min, y_max, max_iter));
+                ui_interface_->set_pending_settings(ViewState(midpoint_x, midpoint_y, zoom, max_iter));
             }
-
-            ImGui::Text("Render Generation: %d", ui_interface_->get_render_generation());
 
             bool thread_pool_active = ui_interface_->is_render_in_progress();
             bool is_dragging = ui_interface_->is_dragging();
@@ -290,27 +261,29 @@ void MandelControl::draw()
             ImGui::Checkbox("Thread Pool Active", &thread_pool_active);
             ImGui::SameLine();
             ImGui::Checkbox("Dragging", &is_dragging);
+            ImGui::SameLine();
+            ImGui::Text("Render Gen.: %d", ui_interface_->get_render_generation());
             ImGui::EndDisabled();
 
             // Saved Views section
             ImGui::Separator();
-            ImGui::Text("Saved Views");
-
             // Input for new view name and save button
             ImGui::PushItemWidth(200.0f);
             char* new_view_name_buffer = ui_interface_->get_new_view_name_buffer();
-            ImGui::InputText("##NewViewName", new_view_name_buffer, 256);
+            bool shouldSave = ImGui::InputText("##NewViewName", new_view_name_buffer, 256, ImGuiInputTextFlags_EnterReturnsTrue);
             ImGui::SameLine();
             std::string new_view_name(new_view_name_buffer);
             std::map<std::string, ViewState>& saved_views = ui_interface_->get_saved_views();
-            if (ImGui::Button("Save Current View"))
+            if (ImGui::Button("Save View"))
             {
-                // Save current viewport state (not buffer bounds)
+                shouldSave = true;
+            }
+            if (shouldSave)
+            {
                 ViewState viewport = ui_interface_->get_viewport_bounds();
                 saved_views[new_view_name] = viewport;
-                new_view_name_buffer[0] = '\0';  // Clear the buffer
-                // Save immediately on manual edit
-                save_views_to_file(saved_views);  // Don't save current view (only named views)
+                new_view_name_buffer[0] = '\0';
+                save_views_to_file(saved_views, &viewport);
             }
             ImGui::PopItemWidth();
 
@@ -343,7 +316,7 @@ void MandelControl::draw()
                     ImGui::EndDisabled();
                 }
 
-                const char* view_format_str = "%.8f to %.8f";
+                const char* view_format_str = "%.18f to %.18f";
                 ViewState initial = ui_interface_->get_initial_bounds();
 
                 if (ImGui::TableNextColumn())  // Iterations
@@ -353,12 +326,12 @@ void MandelControl::draw()
 
                 if (ImGui::TableNextColumn())  // X Range
                 {
-                    ImGui::Text(view_format_str, static_cast<double>(initial.x_min), static_cast<double>(initial.x_max));
+                    ImGui::Text(view_format_str, static_cast<double>(initial.x_min()), static_cast<double>(initial.x_max()));
                 }
 
                 if (ImGui::TableNextColumn())  // Y Range
                 {
-                    ImGui::Text(view_format_str, static_cast<double>(initial.y_min), static_cast<double>(initial.y_max));
+                    ImGui::Text(view_format_str, static_cast<double>(initial.y_min()), static_cast<double>(initial.y_max()));
                 }
 
                 // Saved views
@@ -403,20 +376,20 @@ void MandelControl::draw()
 
                     if (ImGui::TableNextColumn())  // X Range
                     {
-                        ImGui::Text(view_format_str, static_cast<double>(state.x_min), static_cast<double>(state.x_max));
+                        ImGui::Text(view_format_str, static_cast<double>(state.x_min()), static_cast<double>(state.x_max()));
                     }
 
                     if (ImGui::TableNextColumn())  // Y Range
                     {
-                        ImGui::Text(view_format_str, static_cast<double>(state.y_min), static_cast<double>(state.y_max));
+                        ImGui::Text(view_format_str, static_cast<double>(state.y_min()), static_cast<double>(state.y_max()));
                     }
 
                     // Handle delete button
                     if (delete_clicked)
                     {
                         it = saved_views.erase(it);
-                        // Save immediately on manual edit
-                        save_views_to_file(saved_views);  // Don't save current view (only named views)
+                        ViewState current = ui_interface_->get_viewport_bounds();
+                        save_views_to_file(saved_views, &current);
                     }
                     else
                     {

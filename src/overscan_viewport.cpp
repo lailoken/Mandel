@@ -1,7 +1,6 @@
 #include "overscan_viewport.hpp"
 
 #include <algorithm>
-#include <cmath>
 
 namespace mandel
 {
@@ -25,18 +24,14 @@ void OverscanViewport::calculate_margins()
 {
     if (overscan_enabled_)
     {
-        // Calculate margins (~1/6 viewport, rounded up)
         margin_x_ = (viewport_width_ + 5) / 6;
         margin_y_ = (viewport_height_ + 5) / 6;
     }
     else
     {
-        // No overscan - margins are 0
         margin_x_ = 0;
         margin_y_ = 0;
     }
-    
-    // Canvas dimensions
     canvas_width_ = viewport_width_ + 2 * margin_x_;
     canvas_height_ = viewport_height_ + 2 * margin_y_;
 }
@@ -55,16 +50,15 @@ OverscanViewport::TextureCoords OverscanViewport::calculate_texture_coords(
 {
     TextureCoords coords;
     
-    // Convert display offset from screen pixels to UV space (normalized to canvas size)
-    // When display_offset is positive (dragged right), we show content from the left (decrease UV)
-    float uv_offset_x = -display_offset_x / static_cast<float>(canvas_width_);
-    float uv_offset_y = -display_offset_y / static_cast<float>(canvas_height_);
-    
-    // Calculate base UV coordinates for viewport area (center of overscanned canvas)
-    float base_uv_min_x = static_cast<float>(margin_x_) / static_cast<float>(canvas_width_);
-    float base_uv_min_y = static_cast<float>(margin_y_) / static_cast<float>(canvas_height_);
-    float base_uv_max_x = static_cast<float>(viewport_width_ + margin_x_) / static_cast<float>(canvas_width_);
-    float base_uv_max_y = static_cast<float>(viewport_height_ + margin_y_) / static_cast<float>(canvas_height_);
+    float canvas_w_f = static_cast<float>(canvas_width_);
+    float canvas_h_f = static_cast<float>(canvas_height_);
+    float uv_offset_x = -display_offset_x / canvas_w_f;
+    float uv_offset_y = -display_offset_y / canvas_h_f;
+
+    float base_uv_min_x = static_cast<float>(margin_x_) / canvas_w_f;
+    float base_uv_min_y = static_cast<float>(margin_y_) / canvas_h_f;
+    float base_uv_max_x = static_cast<float>(viewport_width_ + margin_x_) / canvas_w_f;
+    float base_uv_max_y = static_cast<float>(viewport_height_ + margin_y_) / canvas_h_f;
     
     // Apply offset to show overscanned area during dragging
     float uv_min_x_unclamped = base_uv_min_x + uv_offset_x;
@@ -101,7 +95,6 @@ OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
     info.draw_x = viewport_pos_x + scale_offset_x;
     info.draw_y = viewport_pos_y + scale_offset_y;
     
-    // Scaled viewport dimensions
     float scaled_width = static_cast<float>(viewport_width_) * display_scale;
     float scaled_height = static_cast<float>(viewport_height_) * display_scale;
     
@@ -112,13 +105,14 @@ OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
     float uv_width = coords.uv_max_x - coords.uv_min_x;
     float uv_height = coords.uv_max_y - coords.uv_min_y;
     
-    // Calculate unclamped UV coordinates to determine clamping
-    float uv_offset_x = -display_offset_x / static_cast<float>(canvas_width_);
-    float uv_offset_y = -display_offset_y / static_cast<float>(canvas_height_);
-    float base_uv_min_x = static_cast<float>(margin_x_) / static_cast<float>(canvas_width_);
-    float base_uv_min_y = static_cast<float>(margin_y_) / static_cast<float>(canvas_height_);
-    float base_uv_max_x = static_cast<float>(viewport_width_ + margin_x_) / static_cast<float>(canvas_width_);
-    float base_uv_max_y = static_cast<float>(viewport_height_ + margin_y_) / static_cast<float>(canvas_height_);
+    float canvas_w_f = static_cast<float>(canvas_width_);
+    float canvas_h_f = static_cast<float>(canvas_height_);
+    float uv_offset_x = -display_offset_x / canvas_w_f;
+    float uv_offset_y = -display_offset_y / canvas_h_f;
+    float base_uv_min_x = static_cast<float>(margin_x_) / canvas_w_f;
+    float base_uv_min_y = static_cast<float>(margin_y_) / canvas_h_f;
+    float base_uv_max_x = static_cast<float>(viewport_width_ + margin_x_) / canvas_w_f;
+    float base_uv_max_y = static_cast<float>(viewport_height_ + margin_y_) / canvas_h_f;
     float uv_min_x_unclamped = base_uv_min_x + uv_offset_x;
     float uv_min_y_unclamped = base_uv_min_y + uv_offset_y;
     float uv_max_x_unclamped = base_uv_max_x + uv_offset_x;
@@ -136,8 +130,6 @@ OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
     float base_uv_width = base_uv_max_x - base_uv_min_x;  // Viewport width in UV space
     float base_uv_height = base_uv_max_y - base_uv_min_y;  // Viewport height in UV space
     
-    // Calculate texture size: scale by the ratio of actual UV width to base UV width
-    // This ensures the texture is drawn at the correct size relative to what we're showing
     info.texture_width = scaled_width * (uv_width / base_uv_width);
     info.texture_height = scaled_height * (uv_height / base_uv_height);
     
@@ -152,7 +144,7 @@ OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
         float clamped_amount_uv = -uv_min_x_unclamped;  // Positive value
         // Convert to screen pixels: this is how much of the viewport is outside the texture
         // clamped_amount_uv is in UV space (normalized to canvas), we need to convert to viewport space
-        float clamped_amount_viewport_uv = clamped_amount_uv / base_uv_width;  // Fraction of viewport
+        float clamped_amount_viewport_uv = clamped_amount_uv / base_uv_width;
         float clamped_amount_screen = clamped_amount_viewport_uv * scaled_width;
         info.texture_offset_x = clamped_amount_screen;
     }
@@ -161,7 +153,7 @@ OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
     {
         // We're showing beyond the top edge: offset texture down to show grey on top
         float clamped_amount_uv = -uv_min_y_unclamped;  // Positive value
-        float clamped_amount_viewport_uv = clamped_amount_uv / base_uv_height;  // Fraction of viewport
+        float clamped_amount_viewport_uv = clamped_amount_uv / base_uv_height;
         float clamped_amount_screen = clamped_amount_viewport_uv * scaled_height;
         info.texture_offset_y = clamped_amount_screen;
     }
@@ -172,6 +164,87 @@ OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
     info.uv_max_x = coords.uv_max_x;
     info.uv_max_y = coords.uv_max_y;
     
+    return info;
+}
+
+OverscanViewport::DrawInfo OverscanViewport::calculate_draw_info(
+    float viewport_pos_x, float viewport_pos_y,
+    float display_offset_x, float display_offset_y,
+    float display_scale,
+    float zoom_center_x, float zoom_center_y,
+    int texture_canvas_width, int texture_canvas_height) const
+{
+    // Use texture's actual dimensions and derived margin for correct center/UV mapping.
+    // margin = (canvas + 5) / 8 (inverse of canvas = viewport + 2*margin with margin = (viewport+5)/6)
+    int tex_margin_x = (texture_canvas_width + 5) / 8;
+    int tex_margin_y = (texture_canvas_height + 5) / 8;
+    int tex_viewport_w = texture_canvas_width - 2 * tex_margin_x;
+    int tex_viewport_h = texture_canvas_height - 2 * tex_margin_y;
+    if (tex_viewport_w <= 0 || tex_viewport_h <= 0)
+    {
+        // Fallback to default when dimensions are invalid
+        return calculate_draw_info(viewport_pos_x, viewport_pos_y,
+                                  display_offset_x, display_offset_y,
+                                  display_scale, zoom_center_x, zoom_center_y);
+    }
+
+    DrawInfo info;
+
+    float scale_offset_x = zoom_center_x * (1.0f - display_scale);
+    float scale_offset_y = zoom_center_y * (1.0f - display_scale);
+    info.draw_x = viewport_pos_x + scale_offset_x;
+    info.draw_y = viewport_pos_y + scale_offset_y;
+
+    // On-screen size: fill current viewport
+    float scaled_width = static_cast<float>(viewport_width_) * display_scale;
+    float scaled_height = static_cast<float>(viewport_height_) * display_scale;
+
+    float tex_canvas_w_f = static_cast<float>(texture_canvas_width);
+    float tex_canvas_h_f = static_cast<float>(texture_canvas_height);
+    float uv_offset_x = -display_offset_x / tex_canvas_w_f;
+    float uv_offset_y = -display_offset_y / tex_canvas_h_f;
+
+    float base_uv_min_x = static_cast<float>(tex_margin_x) / tex_canvas_w_f;
+    float base_uv_min_y = static_cast<float>(tex_margin_y) / tex_canvas_h_f;
+    float base_uv_max_x = static_cast<float>(tex_margin_x + tex_viewport_w) / tex_canvas_w_f;
+    float base_uv_max_y = static_cast<float>(tex_margin_y + tex_viewport_h) / tex_canvas_h_f;
+
+    float uv_min_x_unclamped = base_uv_min_x + uv_offset_x;
+    float uv_min_y_unclamped = base_uv_min_y + uv_offset_y;
+    float uv_max_x_unclamped = base_uv_max_x + uv_offset_x;
+    float uv_max_y_unclamped = base_uv_max_y + uv_offset_y;
+
+    info.uv_min_x = std::max(0.0f, std::min(1.0f, uv_min_x_unclamped));
+    info.uv_min_y = std::max(0.0f, std::min(1.0f, uv_min_y_unclamped));
+    info.uv_max_x = std::max(0.0f, std::min(1.0f, uv_max_x_unclamped));
+    info.uv_max_y = std::max(0.0f, std::min(1.0f, uv_max_y_unclamped));
+
+    bool clamped_left = (uv_min_x_unclamped < 0.0f);
+    bool clamped_top = (uv_min_y_unclamped < 0.0f);
+
+    float base_uv_width = base_uv_max_x - base_uv_min_x;
+    float base_uv_height = base_uv_max_y - base_uv_min_y;
+    float uv_width = info.uv_max_x - info.uv_min_x;
+    float uv_height = info.uv_max_y - info.uv_min_y;
+
+    info.texture_width = scaled_width * (uv_width / base_uv_width);
+    info.texture_height = scaled_height * (uv_height / base_uv_height);
+
+    info.texture_offset_x = 0.0f;
+    info.texture_offset_y = 0.0f;
+    if (clamped_left)
+    {
+        float clamped_amount_uv = -uv_min_x_unclamped;
+        float clamped_amount_viewport_uv = clamped_amount_uv / base_uv_width;
+        info.texture_offset_x = clamped_amount_viewport_uv * scaled_width;
+    }
+    if (clamped_top)
+    {
+        float clamped_amount_uv = -uv_min_y_unclamped;
+        float clamped_amount_viewport_uv = clamped_amount_uv / base_uv_height;
+        info.texture_offset_y = clamped_amount_viewport_uv * scaled_height;
+    }
+
     return info;
 }
 

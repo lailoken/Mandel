@@ -4,20 +4,17 @@ namespace mandel
 {
 
 // Abstraction for viewport with overscan support
-// Handles mapping between viewport (visible area) and canvas (viewport + overscan margins)
+// 1:1 coordinate aspect (square region in complex plane), but renders to full window (may stretch when non-square)
 class OverscanViewport
 {
 public:
     OverscanViewport(int viewport_width, int viewport_height);
     
-    // Update viewport dimensions (recalculates margins and canvas)
     void set_viewport_size(int width, int height);
     
-    // Enable/disable overscan (when disabled, margins are 0)
     void set_overscan_enabled(bool enabled);
     bool get_overscan_enabled() const { return overscan_enabled_; }
     
-    // Get dimensions
     int viewport_width() const { return viewport_width_; }
     int viewport_height() const { return viewport_height_; }
     int canvas_width() const { return canvas_width_; }
@@ -63,9 +60,16 @@ public:
                                  float display_scale,
                                  float zoom_center_x, float zoom_center_y) const;
 
+    // Overload using explicit texture dimensions (for when displayed texture differs from current viewport, e.g. during resize)
+    DrawInfo calculate_draw_info(float viewport_pos_x, float viewport_pos_y,
+                                 float display_offset_x, float display_offset_y,
+                                 float display_scale,
+                                 float zoom_center_x, float zoom_center_y,
+                                 int texture_canvas_width, int texture_canvas_height) const;
+
 private:
     void calculate_margins();
-    
+
     int viewport_width_;
     int viewport_height_;
     int margin_x_;
