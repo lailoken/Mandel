@@ -59,8 +59,12 @@ namespace detail
                                          step != static_cast<FloatType>(0.0) ? &step_d : nullptr,
                                          step_fast != static_cast<FloatType>(0.0) ? &step_fast_d : nullptr,
                                          double_format);
-        // Validate output - ensure we don't get NaN back
-        if (!std::isnan(temp) && !std::isinf(temp))
+        // Only write back when the user actually edited the field.
+        // Unconditional write-back silently double-rounds the long-double value every frame;
+        // the round-tripped value then compared against full-precision applied_settings_ can
+        // fire spuriously at deep zoom (catastrophic cancellation in x_range → imprecise zoom
+        // → ImGui clamps the slider → zoom_edited = true → feedback loop).
+        if (result && !std::isnan(temp) && !std::isinf(temp))
         {
             *v = static_cast<FloatType>(temp);
         }
@@ -228,6 +232,11 @@ void MandelControl::draw()
             double log_zoom_val = std::log10(zoom_d);
             double min_log_zoom = std::log10(min_zoom_d);
             double max_log_zoom = std::log10(max_zoom_d);
+            // Pre-clamp before passing to SliderScalar: if the value is already out of the
+            // slider range, ImGui will clamp it internally AND return true, which would be
+            // indistinguishable from a genuine user interaction and would trigger a spurious
+            // re-render (with catastrophic-cancellation coordinates) at deep zoom levels.
+            log_zoom_val = std::clamp(log_zoom_val, min_log_zoom, max_log_zoom);
 
             bool zoom_edited = ImGui::SliderScalar("Zoom", ImGuiDataType_Double, &log_zoom_val, &min_log_zoom, &max_log_zoom, "10^%.2f");
 

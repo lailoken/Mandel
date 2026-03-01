@@ -356,11 +356,12 @@ void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
 void MandelUI::handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_screen_y)
 {
     // Accumulate the zoom factor relative to the DISPLAYED texture.
-    // Reset when no render is pending (start of a new zoom sequence).
-    // This ensures:
-    //   1. complex_x is always within the new canvas bounds (no overscan blowout on rapid scroll).
-    //   2. The target display_offset equals display_offset_* (proven below), so no drift across ticks.
-    if (!render_pending_)
+    // Reset at the start of a new zoom sequence:
+    //   - no render pending (previous render just finished), OR
+    //   - a non-ZOOM render is pending (e.g. PAN). In that case the old accumulator is from a
+    //     previous, unrelated zoom sequence; reusing it inverts the scroll direction when the
+    //     user zooms out after a large zoom-in that was interrupted by a pan.
+    if (!render_pending_ || render_source_ != RenderSource::ZOOM)
         accumulated_zoom_factor_ = 1.0f;
     accumulated_zoom_factor_ *= std::pow(1.2f, wheel_delta);
 
@@ -553,10 +554,13 @@ void MandelUI::update_textures()
         return;
     }
 
-    // Skip same-bounds re-renders only for non-ZOOM sources (e.g. a resize that produced identical bounds).
-    // ZOOM renders must always swap so that iteration-only changes are displayed and
-    // pending_zoom_offset is applied correctly.
-    if (render_source_ != RenderSource::ZOOM &&
+    // Skip same-bounds re-renders only for OTHER source (e.g. a resize that produced identical
+    // bounds).  ZOOM and PAN renders must always swap:
+    //   - ZOOM: pending_zoom_offset must be applied; iteration-only changes must be displayed.
+    //   - PAN: at deep zoom the canvas shifts by tiny complex amounts (e.g. 1.6e-10 at zoom 1e9)
+    //     that are below the old 1e-9 absolute threshold, so they were silently discarded,
+    //     leaving display_offset un-adjusted and triggering an infinite re-render loop.
+    if (render_source_ == RenderSource::OTHER &&
         texture_front_ != 0 &&
         std::abs(render_start_canvas_x_min_ - displayed_texture_canvas_x_min_) < 1e-9 &&
         std::abs(render_start_canvas_x_max_ - displayed_texture_canvas_x_max_) < 1e-9 &&
@@ -727,10 +731,19 @@ void MandelUI::apply_view_state(const ViewState& state)
 
     // Detect iteration-only changes (bounds unchanged). Preserve display_offset so the view
     // doesn't snap to center when the user just changes max iterations.
-    bool bounds_changed = std::abs(new_cx_min - canvas_x_min_) > 1e-9 ||
-                          std::abs(new_cx_max - canvas_x_max_) > 1e-9 ||
-                          std::abs(new_cy_min - canvas_y_min_) > 1e-9 ||
-                          std::abs(new_cy_max - canvas_y_max_) > 1e-9;
+    // Use a half-pixel tolerance that scales with zoom so it stays valid at any depth.
+    // 1e-9 absolute was wrong at deep zoom: at zoom 1e9, pixel_size ≈ 3e-12, so 1e-9 ≈ 333 px
+    // and even a one-notch zoom-slider move (≈1e-10 change) was invisible to this check.
+    FloatType pixel_size_x = (canvas_x_max_ - canvas_x_min_) /
+                              static_cast<FloatType>(overscan_viewport_.canvas_width());
+    FloatType pixel_size_y = (canvas_y_max_ - canvas_y_min_) /
+                              static_cast<FloatType>(overscan_viewport_.canvas_height());
+    FloatType tol_x = pixel_size_x * static_cast<FloatType>(0.5);
+    FloatType tol_y = pixel_size_y * static_cast<FloatType>(0.5);
+    bool bounds_changed = std::abs(new_cx_min - canvas_x_min_) > tol_x ||
+                          std::abs(new_cx_max - canvas_x_max_) > tol_x ||
+                          std::abs(new_cy_min - canvas_y_min_) > tol_y ||
+                          std::abs(new_cy_max - canvas_y_max_) > tol_y;
 
     canvas_x_min_ = new_cx_min;
     canvas_x_max_ = new_cx_max;
