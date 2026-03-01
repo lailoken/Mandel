@@ -2,6 +2,8 @@
 
 A C++ project using Dear ImGui with SDL2 and OpenGL3 backends.
 
+Licensed under the [MIT License](LICENSE).
+
 ## Prerequisites
 
 - CMake 3.15 or higher
