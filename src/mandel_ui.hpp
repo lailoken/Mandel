@@ -91,6 +91,7 @@ private:
                                FloatType& canvas_y_min, FloatType& canvas_y_max) const;
     void handle_pan(float display_offset_x, float display_offset_y);
     void handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_screen_y);
+    void handle_double_click_center(float mouse_screen_x, float mouse_screen_y);
     // Convert display_offset from old texture bounds to new (so same complex point stays under mouse)
     void convert_display_offset_on_swap();
 
@@ -139,7 +140,7 @@ private:
     float accumulated_zoom_factor_;
     // Prevents cascading panic re-triggers within a single render cycle
     bool panic_pan_triggered_;
-    enum class RenderSource { PAN, ZOOM, OTHER };
+    enum class RenderSource { PAN, ZOOM, CENTER, OTHER };
     RenderSource render_source_;
 
     // Worker (MandelWorker for real Mandelbrot rendering)

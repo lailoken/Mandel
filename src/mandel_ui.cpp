@@ -277,6 +277,14 @@ void MandelUI::handle_input()
         float mouse_screen_y = mouse_pos.y - viewport_pos.y;
         handle_zoom(io.MouseWheel, mouse_screen_x, mouse_screen_y);
     }
+
+    // Double-click on background: center view at clicked position
+    if (ImGui::IsMouseDoubleClicked(0) && mouse_over_viewport && !control_window_hovered && !imgui_wants_mouse)
+    {
+        float mouse_screen_x = mouse_pos.x - viewport_pos.x;
+        float mouse_screen_y = mouse_pos.y - viewport_pos.y;
+        handle_double_click_center(mouse_screen_x, mouse_screen_y);
+    }
 }
 
 void MandelUI::handle_pan(float display_offset_x, float display_offset_y)
@@ -411,6 +419,45 @@ void MandelUI::handle_zoom(float wheel_delta, float mouse_screen_x, float mouse_
     start_render();
 }
 
+void MandelUI::handle_double_click_center(float mouse_screen_x, float mouse_screen_y)
+{
+    if (render_pending_)
+        return;
+
+    // Use displayed texture's overscan dimensions for mouse-to-complex conversion
+    int disp_w = (displayed_canvas_width_ > 0) ? displayed_canvas_width_ : overscan_viewport_.canvas_width();
+    int disp_h = (displayed_canvas_height_ > 0) ? displayed_canvas_height_ : overscan_viewport_.canvas_height();
+    int disp_mx = (disp_w + 5) / 8;
+    int disp_my = (disp_h + 5) / 8;
+    float margin_x_f = static_cast<float>(disp_mx);
+    float margin_y_f = static_cast<float>(disp_my);
+    float canvas_w_f = static_cast<float>(disp_w);
+    float canvas_h_f = static_cast<float>(disp_h);
+
+    float canvas_px = margin_x_f + mouse_screen_x - display_offset_x_;
+    float canvas_py = margin_y_f + mouse_screen_y - display_offset_y_;
+
+    FloatType disp_x_range = displayed_texture_canvas_x_max_ - displayed_texture_canvas_x_min_;
+    FloatType disp_y_range = displayed_texture_canvas_y_max_ - displayed_texture_canvas_y_min_;
+    FloatType complex_x = displayed_texture_canvas_x_min_ + static_cast<FloatType>(canvas_px) / canvas_w_f * disp_x_range;
+    FloatType complex_y = displayed_texture_canvas_y_max_ - static_cast<FloatType>(canvas_py) / canvas_h_f * disp_y_range;
+
+    // Center view at clicked position
+    viewport_midpoint_x_ = complex_x;
+    viewport_midpoint_y_ = complex_y;
+    display_offset_x_ = 0.0f;
+    display_offset_y_ = 0.0f;
+
+    applied_settings_ = ViewState(viewport_midpoint_x_, viewport_midpoint_y_, zoom_, max_iterations_);
+    has_pending_settings_ = false;
+
+    pending_zoom_offset_x_ = 0.0f;
+    pending_zoom_offset_y_ = 0.0f;
+    render_source_ = RenderSource::CENTER;
+
+    start_render();
+}
+
 bool MandelUI::compute_swap_conversion(
     FloatType displayed_canvas_x_min, FloatType displayed_canvas_x_max,
     FloatType displayed_canvas_y_min, FloatType displayed_canvas_y_max,
@@ -511,6 +558,14 @@ void MandelUI::convert_display_offset_on_swap()
         display_offset_x_ = pending_zoom_offset_x_;
         display_offset_y_ = pending_zoom_offset_y_;
         DEBUG_PRINTF("  ZOOM: set offset=(%.2f, %.2f)\n", pending_zoom_offset_x_, pending_zoom_offset_y_);
+    }
+    else if (render_source_ == RenderSource::CENTER)
+    {
+        // Double-click center: new texture is already composed with clicked point at viewport center
+        // Keep display_offset at 0 so that point stays at window center
+        display_offset_x_ = 0.0f;
+        display_offset_y_ = 0.0f;
+        DEBUG_PRINTF("  CENTER: offset=(0, 0)\n");
     }
     else
     {
