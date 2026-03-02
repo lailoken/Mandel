@@ -79,24 +79,14 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(STATIC_LINKING "Link all libraries statically (reduces runtime dependencies)" OFF)
 option(UNIT_TEST "Enable unit test mode (disables threading, verifies pixel coverage)" OFF)
 
-# Static linking configuration
+# Static linking configuration: prefer static SDL2 when available
 if(STATIC_LINKING)
-    message(STATUS "Static linking enabled")
-    # Prefer static libraries when searching
-    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a;.so" CACHE STRING "" FORCE)
-    # Prefer static libraries over shared
-    set(CMAKE_FIND_LIBRARY_SUFFIXES_SAVED ${CMAKE_FIND_LIBRARY_SUFFIXES})
-    set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+    message(STATUS "Static linking enabled (SDL2 static preferred, fallback to dynamic)")
 endif()
 
 # Find packages
 find_package(SDL2 REQUIRED)
 find_package(OpenGL REQUIRED)
-
-# Restore library suffixes after finding packages
-if(STATIC_LINKING)
-    set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_SAVED})
-endif()
 
 # Include directories
 include_directories(${SDL2_INCLUDE_DIRS})
@@ -184,48 +174,41 @@ endif()
 
 # Link libraries
 if(STATIC_LINKING)
-    # For static linking, prefer static libraries
-    # SDL2: Modern CMake SDL2 package provides imported targets
+    # SDL2: Try static first, fall back to dynamic
+    set(SDL2_LINKED_STATIC FALSE)
     if(TARGET SDL2::SDL2static)
-        # Prefer static SDL2 if available
         target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2static)
-        message(STATUS "Linking SDL2 statically")
-    elseif(TARGET SDL2::SDL2)
-        # Fallback to SDL2 target (may be shared or static depending on what's available)
-        target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
-        message(STATUS "Linking SDL2 (target-based)")
+        set(SDL2_LINKED_STATIC TRUE)
+        message(STATUS "Linking SDL2 statically (SDL2::SDL2static)")
     else()
-        # Fallback to manual linking with preference for static
+        # Prefer .a over .so for this search
+        set(CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP ${CMAKE_FIND_LIBRARY_SUFFIXES})
+        set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
         find_library(SDL2_STATIC_LIB
-            NAMES libSDL2.a SDL2
-            PATHS ${SDL2_LIBRARY_DIRS}
-            NO_DEFAULT_PATH
+            NAMES SDL2
+            PATHS ${SDL2_LIBRARY_DIRS} /usr/lib64 /usr/lib
+            PATH_SUFFIXES lib64 lib
         )
+        set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP})
         if(SDL2_STATIC_LIB)
             target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_STATIC_LIB})
-            message(STATUS "Linking SDL2 statically (manual)")
-        else()
-            target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_LIBRARIES})
-            message(WARNING "SDL2 static library not found, using shared library")
+            set(SDL2_LINKED_STATIC TRUE)
+            message(STATUS "Linking SDL2 statically: ${SDL2_STATIC_LIB}")
         endif()
     endif()
+    if(NOT SDL2_LINKED_STATIC)
+        if(TARGET SDL2::SDL2)
+            target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
+        else()
+            target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_LIBRARIES})
+        endif()
+        message(STATUS "SDL2 static not found, using dynamic SDL2")
+    endif()
     
-    # OpenGL: On Linux, OpenGL is typically provided by the graphics driver
-    # and should remain dynamic for compatibility. Full static linking of OpenGL
-    # is not recommended as it's driver-dependent and loaded at runtime.
-    # However, on some systems you might be able to link Mesa statically.
-    message(STATUS "Note: OpenGL will remain dynamically linked for driver compatibility")
+    # OpenGL: Keep dynamic for driver compatibility
+    message(STATUS "OpenGL will remain dynamically linked for driver compatibility")
     target_link_libraries(${PROJECT_NAME} PRIVATE ${OPENGL_LIBRARIES})
     
-    # Configure linker to prefer static libraries
-    set_target_properties(${PROJECT_NAME} PROPERTIES
-        LINK_SEARCH_START_STATIC TRUE
-        LINK_SEARCH_END_STATIC TRUE
-    )
-    
-    # Optionally link standard C++ runtime statically (uncomment if needed)
-    # WARNING: This may cause compatibility issues on some systems
-    # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
 else()
     # Dynamic linking (default)
     if(TARGET SDL2::SDL2)

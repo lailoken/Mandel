@@ -24,10 +24,16 @@ sudo dnf install cmake gcc-c++ SDL2-devel mesa-libGL-devel
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
 ```
 
-For static linking (reduces runtime dependencies):
+For static SDL2 linking (self-contained binary, no SDL2 runtime needed):
 ```bash
+# Fedora/Nobara: install static SDL2
+sudo dnf install SDL2-devel sdl2-compat-static
+
+# Configure and build
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DSTATIC_LINKING=ON
+cmake --build build
 ```
+If static SDL2 is not available, the build automatically falls back to dynamic linking.
 
 2. Build:
 ```bash
