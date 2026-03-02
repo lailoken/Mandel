@@ -1,6 +1,6 @@
 # Mandel
 
-An interactive Mandelbrot fractal explorer built with Dear ImGui, SDL2, and OpenGL3.
+An interactive Mandelbrot fractal explorer built with Dear ImGui, SDL2, and OpenGL3. Uses the **Mariani–Silver algorithm** (recursive quadtree subdivision with solid guessing): regions with uniform iteration count are flood-filled without per-pixel computation, and subdivision is parallelized via a thread pool.
 
 ![Mandel sample](Mandel-sample.png)
 
