@@ -1,6 +1,8 @@
-# Mandel - ImGui + SDL2 + OpenGL3
+# Mandel
 
-A C++ project using Dear ImGui with SDL2 and OpenGL3 backends.
+An interactive Mandelbrot fractal explorer built with Dear ImGui, SDL2, and OpenGL3.
+
+![Mandel sample](Mandel-sample.png)
 
 Licensed under the [MIT License](LICENSE).
 
@@ -44,15 +46,9 @@ The executable will be in `build/` (or `build/Debug/`/`build/Release/` depending
 
 ### Static Linking Notes
 
-- **SDL2**: Will be statically linked if static libraries are available
-- **OpenGL**: Remains dynamically linked for driver compatibility (this is standard and recommended)
-- **ImGui**: Already compiled from source, so it's always statically linked
-- **System libraries** (pthread, dl): Required system libraries that are linked appropriately
-
-To build a statically linked binary:
-- Install SDL2 static development libraries if available (e.g., `libsdl2-dev` package should include static libs, or build SDL2 from source)
-- Configure with `-DSTATIC_LINKING=ON`
-- Note: You'll still need OpenGL runtime libraries (`libopengl0` or Mesa) on the target system
+- **SDL2**: Statically linked when available (e.g. `sdl2-compat-static` on Fedora), otherwise dynamic
+- **OpenGL**: Dynamically linked for driver compatibility
+- **ImGui**: Compiled from source, always statically linked
 
 ## ImGui Setup
 
@@ -81,6 +77,8 @@ Mandel/
 ├── src/                 # Source files (.cpp, .hpp)
 ├── external/            # External dependencies (optional)
 ├── build/               # Build directory (generated)
-└── .vscode/             # VS Code configuration
+├── .vscode/             # VS Code configuration
+├── LICENSE              # MIT License
+└── Mandel-sample.png    # Screenshot
 ```
 
