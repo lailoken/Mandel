@@ -74,17 +74,30 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
 endif()
 
-# Options
+# Options (static linking defaults ON for Release for portable binaries across distros)
+set(STATIC_LINKING_DEFAULT OFF)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(STATIC_LINKING_DEFAULT ON)
+endif()
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
-option(STATIC_LINKING "Link all libraries statically (reduces runtime dependencies)" OFF)
+option(STATIC_LINKING "Link all libraries statically (reduces runtime dependencies)" ${STATIC_LINKING_DEFAULT})
 option(UNIT_TEST "Enable unit test mode (disables threading, verifies pixel coverage)" OFF)
 
 # Static linking configuration: prefer static SDL2 when available
 if(STATIC_LINKING)
     message(STATUS "Static linking enabled (SDL2 static preferred, fallback to dynamic)")
+    # Embed libstdc++ and libgcc so the binary does not depend on host's C++ runtime
+    # (avoids Fedora-built binary dumping on Ubuntu due to libstdc++.so version mismatch)
+    if(UNIX AND NOT APPLE AND NOT MSVC)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+        message(STATUS "Static C++ runtime: -static-libgcc -static-libstdc++")
+    endif()
+    # Note: glibc stays dynamic; building on a newer glibc (e.g. Fedora) can make the binary
+    # fail on older glibc (e.g. Ubuntu). For max portability, build on oldest target (e.g. Ubuntu container).
 endif()
 
 # Find packages
+find_package(PkgConfig QUIET)
 find_package(SDL2 REQUIRED)
 find_package(OpenGL REQUIRED)
 
@@ -181,19 +194,36 @@ if(STATIC_LINKING)
         set(SDL2_LINKED_STATIC TRUE)
         message(STATUS "Linking SDL2 statically (SDL2::SDL2static)")
     else()
-        # Prefer .a over .so for this search
-        set(CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP ${CMAKE_FIND_LIBRARY_SUFFIXES})
-        set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
-        find_library(SDL2_STATIC_LIB
-            NAMES SDL2
-            PATHS ${SDL2_LIBRARY_DIRS} /usr/lib64 /usr/lib
-            PATH_SUFFIXES lib64 lib
-        )
-        set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP})
-        if(SDL2_STATIC_LIB)
-            target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_STATIC_LIB})
-            set(SDL2_LINKED_STATIC TRUE)
-            message(STATUS "Linking SDL2 statically: ${SDL2_STATIC_LIB}")
+        # Use pkg-config to get SDL2 + all static deps (X11, Wayland, etc.) so nothing is left dynamic
+        if(PkgConfig_FOUND)
+            execute_process(
+                COMMAND ${PKG_CONFIG_EXECUTABLE} --static --libs SDL2
+                OUTPUT_VARIABLE SDL2_STATIC_PC_LIBS
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE SDL2_PC_RESULT
+            )
+            if(SDL2_PC_RESULT EQUAL 0 AND SDL2_STATIC_PC_LIBS)
+                separate_arguments(SDL2_STATIC_PC_LIST NATIVE_COMMAND "${SDL2_STATIC_PC_LIBS}")
+                target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_STATIC_PC_LIST})
+                set(SDL2_LINKED_STATIC TRUE)
+                message(STATUS "Linking SDL2 statically via pkg-config (SDL2 + system deps)")
+            endif()
+        endif()
+        if(NOT SDL2_LINKED_STATIC)
+            # Fallback: prefer .a over .so for this search
+            set(CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP ${CMAKE_FIND_LIBRARY_SUFFIXES})
+            set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
+            find_library(SDL2_STATIC_LIB
+                NAMES SDL2
+                PATHS ${SDL2_LIBRARY_DIRS} /usr/lib64 /usr/lib
+                PATH_SUFFIXES lib64 lib
+            )
+            set(CMAKE_FIND_LIBRARY_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP})
+            if(SDL2_STATIC_LIB)
+                target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_STATIC_LIB})
+                set(SDL2_LINKED_STATIC TRUE)
+                message(STATUS "Linking SDL2 statically: ${SDL2_STATIC_LIB}")
+            endif()
         endif()
     endif()
     if(NOT SDL2_LINKED_STATIC)

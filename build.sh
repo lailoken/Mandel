@@ -18,11 +18,13 @@ BUILD_DIR="${SCRIPT_DIR}/build/${BUILD_TYPE}"
 
 echo "Building Mandel in ${BUILD_TYPE} mode..."
 
-# Configure CMake
+# Configure CMake (Release => static linking by default for portable binaries)
+CMAKE_OPTS=(-B "${BUILD_DIR}" -S "${SCRIPT_DIR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}")
+if [[ "${BUILD_TYPE}" == "Release" ]]; then
+    CMAKE_OPTS+=(-DSTATIC_LINKING=ON)
+fi
 echo "Configuring CMake..."
-cmake -B "${BUILD_DIR}" \
-      -S "${SCRIPT_DIR}" \
-      -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+cmake "${CMAKE_OPTS[@]}"
 
 # Build the project
 echo "Building project..."

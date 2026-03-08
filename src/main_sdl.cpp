@@ -5,6 +5,10 @@
 #include <SDL2/SDL.h>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl2.h"
 #include "mandel_ui.hpp"
@@ -47,6 +51,11 @@ static void delete_texture_opengl(ImTextureID texture_id)
 
 int main(int /* argc */, char* /* argv */[])
 {
+#ifdef _WIN32
+    // Tell Windows we are DPI aware (see ImGui FAQ: How should I handle DPI in my application)
+    ::SetProcessDPIAware();
+#endif
+
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0)
     {
@@ -139,10 +148,24 @@ int main(int /* argc */, char* /* argv */[])
             last_time = current_time;
         }
 
-        // Start the Dear ImGui frame
+        // Start the Dear ImGui frame (backend sets io.DisplaySize and io.DisplayFramebufferScale)
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+
+        // DPI scaling per https://github.com/ocornut/imgui/blob/master/docs/FAQ.md#q-how-should-i-handle-dpi-in-my-application
+        float dpi_scale = (io.DisplayFramebufferScale.x + io.DisplayFramebufferScale.y) * 0.5f;
+        if (dpi_scale > 0.0f)
+        {
+            ImGuiStyle& style = ImGui::GetStyle();
+            style.FontScaleDpi = dpi_scale;  // scale all fonts (ImGui 1.92+)
+            static bool dpi_style_scaled_once = false;
+            if (!dpi_style_scaled_once)
+            {
+                style.ScaleAllSizes(dpi_scale);  // scale paddings, spacing, etc. — call once
+                dpi_style_scaled_once = true;
+            }
+        }
 
         // run imgui sample:
         // ImGui::ShowDemoWindow();
@@ -151,9 +174,11 @@ int main(int /* argc */, char* /* argv */[])
 
         // Rendering
         ImGui::Render();
-        
-        // Clear the background
-        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+
+        // Viewport must use framebuffer pixel size (not logical DisplaySize) for correct high-DPI rendering
+        int fb_w = (int)(io.DisplaySize.x * io.DisplayFramebufferScale.x);
+        int fb_h = (int)(io.DisplaySize.y * io.DisplayFramebufferScale.y);
+        glViewport(0, 0, fb_w, fb_h);
         glClearColor(0.45f, 0.55f, 0.60f, 1.00f);  // ImGui dark theme background color
         glClear(GL_COLOR_BUFFER_BIT);
         
