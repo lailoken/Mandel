@@ -53,6 +53,31 @@
             }
         },
         {
+            "label": "Build Release (static)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build.sh",
+            "args": [
+                "--release-static"
+            ],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": ["absolute"],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            }
+        },
+        {
             "label": "Configure",
             "type": "shell",
             "command": "cmake",
@@ -94,6 +119,23 @@
             "args": [
                 "--build",
                 "${workspaceFolder}/build/Release",
+                "--target",
+                "clean"
+            ],
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Clean Release (static)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build/Release-static",
                 "--target",
                 "clean"
             ],

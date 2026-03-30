@@ -81,6 +81,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(STATIC_LINKING "Link all libraries statically (reduces runtime dependencies)" ${STATIC_LINKING_DEFAULT})
+option(STATIC_LINKING_STRICT "With STATIC_LINKING: fail if SDL2 cannot be linked statically (no dynamic SDL2 fallback)" OFF)
 option(UNIT_TEST "Enable unit test mode (disables threading, verifies pixel coverage)" OFF)
 
 # Static linking configuration: prefer static SDL2 when available
@@ -210,7 +211,23 @@ if(STATIC_LINKING)
             endif()
         endif()
         if(NOT SDL2_LINKED_STATIC)
-            # Fallback: prefer .a over .so for this search
+            find_program(SDL2_CONFIG_EXECUTABLE NAMES sdl2-config)
+            if(SDL2_CONFIG_EXECUTABLE)
+                execute_process(
+                    COMMAND ${SDL2_CONFIG_EXECUTABLE} --static-libs
+                    OUTPUT_VARIABLE SDL2_STATIC_CONFIG_LIBS
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE SDL2_CONFIG_RESULT
+                )
+                if(SDL2_CONFIG_RESULT EQUAL 0 AND SDL2_STATIC_CONFIG_LIBS)
+                    separate_arguments(SDL2_STATIC_CONFIG_LIST NATIVE_COMMAND "${SDL2_STATIC_CONFIG_LIBS}")
+                    target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_STATIC_CONFIG_LIST})
+                    set(SDL2_LINKED_STATIC TRUE)
+                    message(STATUS "Linking SDL2 statically via sdl2-config --static-libs")
+                endif()
+            endif()
+        endif()
+        if(NOT SDL2_LINKED_STATIC)
             set(CMAKE_FIND_LIBRARY_SUFFIXES_BACKUP ${CMAKE_FIND_LIBRARY_SUFFIXES})
             set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
             find_library(SDL2_STATIC_LIB
@@ -222,11 +239,17 @@ if(STATIC_LINKING)
             if(SDL2_STATIC_LIB)
                 target_link_libraries(${PROJECT_NAME} PRIVATE ${SDL2_STATIC_LIB})
                 set(SDL2_LINKED_STATIC TRUE)
-                message(STATUS "Linking SDL2 statically: ${SDL2_STATIC_LIB}")
+                message(WARNING
+                    "Linking only ${SDL2_STATIC_LIB}; if linking fails, install SDL2 dev (sdl2-config/pkg-config) for full static dependency list.")
             endif()
         endif()
     endif()
     if(NOT SDL2_LINKED_STATIC)
+        if(STATIC_LINKING_STRICT)
+            message(FATAL_ERROR
+                "STATIC_LINKING_STRICT: SDL2 could not be linked statically. "
+                "Install a static SDL2 (e.g. libsdl2-dev with libSDL2.a, or SDL2 built with -DBUILD_SHARED_LIBS=OFF).")
+        endif()
         if(TARGET SDL2::SDL2)
             target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
         else()
